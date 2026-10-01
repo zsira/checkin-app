@@ -42,6 +42,8 @@ function init() {
   $('btn-create-group').onclick = openCreateGroup;
   $('cg-cancel').onclick = closeCreateGroup;
   $('cg-save').onclick = createGroup;
+  $('cg-loc-btn').onclick = () => useCurrentLocation('cg-lat', 'cg-lng', 'cg-addr-result');
+  $('cg-geo-btn').onclick = () => geocodeAddress('cg-addr', 'cg-lat', 'cg-lng', 'cg-addr-result');
 
   // 邀请
   $('invite-close').onclick = closeInvite;
@@ -269,6 +271,17 @@ function editGroup(id) {
   $('modal-title').textContent = '编辑群组';
   $('modal-fields').innerHTML = `
     <div class="field"><label>群组名称</label><input id="ef-name" value="${esc(g.name)}"></div>
+    <div class="field">
+      <label>📍 定位或地址识别</label>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="btn-save" onclick="useCurrentLocation('ef-lat','ef-lng','ef-addr-result')" style="flex:1;padding:10px;font-size:13px">使用当前位置</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <input id="ef-addr" type="text" placeholder="输入地址自动识别坐标" style="flex:1;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;outline:none;box-sizing:border-box">
+        <button type="button" class="btn-save" onclick="geocodeAddress('ef-addr','ef-lat','ef-lng','ef-addr-result')" style="flex:none;padding:10px 14px;font-size:13px">识别</button>
+      </div>
+      <div id="ef-addr-result" style="font-size:12px;color:var(--success);margin-top:4px;min-height:16px"></div>
+    </div>
     <div class="field"><label>中心点纬度（不限制留空）</label><input id="ef-lat" value="${g.center_lat ?? ''}" placeholder="如 22.951"></div>
     <div class="field"><label>中心点经度（不限制留空）</label><input id="ef-lng" value="${g.center_lng ?? ''}" placeholder="如 113.877"></div>
     <div class="field"><label>打卡范围（米，0=不限制）</label><input id="ef-radius" type="number" value="${g.radius ?? 0}"></div>
@@ -458,12 +471,76 @@ function openCreateGroup() {
   $('cg-lat').value = '';
   $('cg-lng').value = '';
   $('cg-radius').value = '0';
+  $('cg-addr').value = '';
+  $('cg-addr-result').textContent = '';
   $('cg-error').textContent = '';
   $('create-group-modal').classList.remove('hidden');
 }
 function closeCreateGroup() {
   $('create-group-modal').classList.add('hidden');
 }
+
+// ---------- 定位与地址识别 ----------
+function useCurrentLocation(latId, lngId, resultId) {
+  const resultEl = $(resultId);
+  resultEl.style.color = 'var(--muted)';
+  resultEl.textContent = '正在获取定位...';
+  if (!window.isSecureContext) {
+    resultEl.style.color = 'var(--danger)';
+    resultEl.textContent = '非 HTTPS 环境无法定位';
+    return;
+  }
+  if (!navigator.geolocation) {
+    resultEl.style.color = 'var(--danger)';
+    resultEl.textContent = '浏览器不支持定位';
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      $(latId).value = pos.coords.latitude.toFixed(6);
+      $(lngId).value = pos.coords.longitude.toFixed(6);
+      resultEl.style.color = 'var(--success)';
+      resultEl.textContent = `已定位：${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)}（精度 ${Math.round(pos.coords.accuracy)}m）`;
+    },
+    (err) => {
+      resultEl.style.color = 'var(--danger)';
+      if (err.code === 1) resultEl.textContent = '定位权限被拒绝，请在浏览器设置中允许';
+      else if (err.code === 2) resultEl.textContent = '无法获取位置，请检查 GPS/定位服务';
+      else if (err.code === 3) resultEl.textContent = '定位超时，请重试';
+      else resultEl.textContent = err.message || '定位失败';
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+  );
+}
+
+async function geocodeAddress(addrId, latId, lngId, resultId) {
+  const address = $(addrId).value.trim();
+  const resultEl = $(resultId);
+  if (!address) {
+    resultEl.style.color = 'var(--danger)';
+    resultEl.textContent = '请先输入地址';
+    return;
+  }
+  resultEl.style.color = 'var(--muted)';
+  resultEl.textContent = '正在识别地址...';
+  try {
+    const res = await fetch('/api/admin/geocode?address=' + encodeURIComponent(address), { headers: authHeaders() });
+    const data = await res.json();
+    if (!res.ok) {
+      resultEl.style.color = 'var(--danger)';
+      resultEl.textContent = data.error || '识别失败';
+      return;
+    }
+    $(latId).value = data.lat.toFixed(6);
+    $(lngId).value = data.lng.toFixed(6);
+    resultEl.style.color = 'var(--success)';
+    resultEl.textContent = `已识别：${data.address || address}`;
+  } catch (e) {
+    resultEl.style.color = 'var(--danger)';
+    resultEl.textContent = '网络错误';
+  }
+}
+
 async function createGroup() {
   const name = $('cg-name').value.trim();
   const lat = $('cg-lat').value.trim();

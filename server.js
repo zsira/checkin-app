@@ -204,6 +204,85 @@ function reverseGeocode(lat, lng) {
   });
 }
 
+// 正向地理编码（地址 -> 坐标）
+function geocode(address) {
+  return new Promise((resolve) => {
+    if (!address) return resolve(null);
+
+    // 1. 高德地图
+    if (AMAP_KEY) {
+      const url = `https://restapi.amap.com/v3/geocode/geo?key=${AMAP_KEY}&address=${encodeURIComponent(address)}&output=json`;
+      https.get(url, { agent: proxyAgent, timeout: 6000 }, (res) => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => {
+          try {
+            const j = JSON.parse(data);
+            if (j.status === '1' && j.geocodes && j.geocodes.length > 0) {
+              const loc = j.geocodes[0].location.split(',');
+              return resolve({ lat: parseFloat(loc[1]), lng: parseFloat(loc[0]), address: j.geocodes[0].formatted_address || address });
+            }
+          } catch {}
+          resolve(null);
+        });
+      }).on('error', () => resolve(null)).on('timeout', function() { this.destroy(); resolve(null); });
+      return;
+    }
+
+    // 2. 天地图
+    if (TIANDITU_KEY) {
+      const ds = JSON.stringify({ keyWord: address, level: 12, mapBound: '-180,-90,180,90', queryType: 7, start: 0, count: 1 });
+      const url = `https://api.tianditu.gov.cn/v2/search?postStr=${encodeURIComponent(ds)}&type=query&tk=${TIANDITU_KEY}`;
+      https.get(url, { agent: proxyAgent, timeout: 6000 }, (res) => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => {
+          try {
+            const j = JSON.parse(data);
+            if (j.coverages && j.coverages.length > 0 && j.coverages[0].Position) {
+              const [lng, lat] = j.coverages[0].Position.split(' ');
+              return resolve({ lat: parseFloat(lat), lng: parseFloat(lng), address: j.coverages[0].name || address });
+            }
+          } catch {}
+          resolve(null);
+        });
+      }).on('error', () => resolve(null)).on('timeout', function() { this.destroy(); resolve(null); });
+      return;
+    }
+
+    // 3. 降级：Open-Meteo（免 key，支持中文）
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(address)}&count=1&language=zh&format=json`;
+    https.get(url, { agent: proxyAgent, timeout: 8000, headers: { 'User-Agent': 'checkin-app/1.0' } }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(data);
+          if (j.results && j.results.length > 0) {
+            const r = j.results[0];
+            const addr = [r.admin1, r.admin2, r.name].filter(Boolean).join(' ') || address;
+            return resolve({ lat: r.latitude, lng: r.longitude, address: addr });
+          }
+        } catch {}
+        resolve(null);
+      });
+    }).on('error', () => resolve(null)).on('timeout', function() { this.destroy(); resolve(null); });
+  });
+}
+
+// 管理后台：地址转坐标
+app.get('/api/admin/geocode', auth, async (req, res) => {
+  try {
+    const address = (req.query.address || '').trim();
+    if (!address) return res.status(400).json({ error: '请输入地址' });
+    const result = await geocode(address);
+    if (!result) return res.status(404).json({ error: '未找到该地址的坐标，请尝试更详细的地址' });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- 登录认证 ----------
 const validTokens = new Map();
 
