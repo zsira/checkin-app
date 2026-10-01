@@ -393,19 +393,34 @@ function getLocation() {
       return reject(new Error('定位权限已被拒绝。请在浏览器设置中找到本网站，将位置权限改为"允许"，然后刷新页面重试。'));
     }
 
-    navigator.geolocation.getCurrentPosition(resolve, (err) => {
-      let msg;
-      if (err.code === 1) {
-        msg = '定位权限被拒绝。请点击浏览器地址栏左侧的锁/图标，将位置权限设为"允许"，然后刷新页面。';
-      } else if (err.code === 2) {
-        msg = '无法获取位置，请检查手机 GPS/定位服务是否已开启';
-      } else if (err.code === 3) {
-        msg = '定位超时，请重试（建议在室外或窗边使用）';
-      } else {
-        msg = err.message || '定位失败';
-      }
-      reject(new Error(msg));
-    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+    // 尝试高精度定位（GPS），失败后降级用网络定位
+    function tryHighAccuracy() {
+      navigator.geolocation.getCurrentPosition(resolve, (err) => {
+        if (err.code === 1) {
+          return reject(new Error('定位权限被拒绝。请点击浏览器地址栏左侧的锁/图标，将位置权限设为"允许"，然后刷新页面。'));
+        }
+        // 高精度失败，降级用网络定位
+        tryLowAccuracy();
+      }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+    }
+
+    function tryLowAccuracy() {
+      navigator.geolocation.getCurrentPosition(resolve, (err) => {
+        let msg;
+        if (err.code === 1) {
+          msg = '定位权限被拒绝。请点击浏览器地址栏左侧的锁/图标，将位置权限设为"允许"，然后刷新页面。';
+        } else if (err.code === 2) {
+          msg = '无法获取位置，请检查手机 GPS/定位服务是否已开启';
+        } else if (err.code === 3) {
+          msg = '定位超时，请重试（建议在室外或窗边使用）';
+        } else {
+          msg = err.message || '定位失败';
+        }
+        reject(new Error(msg));
+      }, { enableHighAccuracy: false, timeout: 20000, maximumAge: 30000 });
+    }
+
+    tryHighAccuracy();
   });
 }
 
