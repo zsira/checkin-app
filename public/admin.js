@@ -62,6 +62,15 @@ function init() {
   $('adm-cancel').onclick = closeAdminModal;
   $('adm-save').onclick = addAdmin;
 
+  // 休息设置
+  $('rest-mode').onchange = () => {
+    const mode = $('rest-mode').value;
+    $('rest-days-box').style.display = mode === 'days' ? '' : 'none';
+    $('rest-range-box').style.display = mode === 'range' ? '' : 'none';
+  };
+  $('rest-cancel').onclick = closeRestModal;
+  $('rest-confirm').onclick = confirmRest;
+
   $('filter-person').addEventListener('input', () => { renderPersons(); });
 }
 
@@ -152,6 +161,7 @@ function renderStats() {
 function renderGroups() {
   const body = $('groups-body');
   if (!allGroups.length) { body.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">暂无群组</td></tr>'; return; }
+  const now = Date.now();
   body.innerHTML = allGroups.map(g => {
     const range = g.radius > 0 && g.center_lat != null
       ? `${g.center_lat.toFixed(4)}, ${g.center_lng.toFixed(4)} · ${g.radius}m`
@@ -160,9 +170,17 @@ function renderGroups() {
     const timesText = times.length
       ? times.map(t => `${t.start}-${t.end}`).join('<br>')
       : '<span style="color:var(--muted)">任意时间</span>';
+    // 休息状态
+    const resting = g.rest_until && Number(g.rest_until) > now;
+    const restBadge = resting
+      ? `<div style="margin-top:4px;font-size:12px;color:#e67e22">🛌 休息至 ${fmtTime(g.rest_until)}</div>`
+      : '';
+    const restBtn = resting
+      ? `<button class="btn-del" onclick="setRest(${g.id}, true)">🛌 取消休息</button>`
+      : `<button class="btn-edit" onclick="setRest(${g.id}, false)">🛌 休息</button>`;
     return `
       <tr>
-        <td><b>${esc(g.name)}</b></td>
+        <td><b>${esc(g.name)}</b>${restBadge}</td>
         <td><span class="tag">${esc(g.code)}</span></td>
         <td>${range}</td>
         <td style="font-size:12px">${timesText}</td>
@@ -171,6 +189,7 @@ function renderGroups() {
         <td>
           <button class="btn-edit" onclick="inviteGroup(${g.id})">📨 邀请</button>
           <button class="btn-edit" onclick="editGroup(${g.id})">✏️ 编辑</button>
+          ${restBtn}
           <button class="btn-del" onclick="delGroup(${g.id},'${esc(g.name).replace(/'/g, "\\'")}')">🗑️ 删除</button>
         </td>
       </tr>`;
@@ -484,6 +503,65 @@ async function delAdmin(id, name) {
 async function delGroup(id, name) {
   if (!confirm(`确定删除群组「${name}」？\n该群组的所有打卡记录将一并删除，且不可恢复！`)) return;
   await fetch('/api/admin/groups/' + id, { method: 'DELETE', headers: authHeaders() });
+  loadAll();
+}
+
+// ---------- 群休息 ----------
+let restingGroupId = null;
+
+function setRest(id, isResting) {
+  if (isResting) {
+    // 取消休息
+    if (!confirm('确定取消该群组的休息状态？成员将恢复打卡。')) return;
+    fetch('/api/admin/groups/' + id + '/rest', {
+      method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rest_until: null, rest_reason: null })
+    }).then(() => loadAll());
+    return;
+  }
+  // 打开休息设置弹窗
+  restingGroupId = id;
+  const g = allGroups.find(x => x.id === id);
+  $('rest-group-name').textContent = g ? g.name : '';
+  $('rest-mode').value = 'days';
+  $('rest-days').value = '1';
+  $('rest-reason').value = '';
+  $('rest-start').value = '';
+  $('rest-end').value = '';
+  $('rest-days-box').style.display = '';
+  $('rest-range-box').style.display = 'none';
+  $('rest-modal').classList.remove('hidden');
+}
+
+function closeRestModal() {
+  $('rest-modal').classList.add('hidden');
+  restingGroupId = null;
+}
+
+async function confirmRest() {
+  if (!restingGroupId) return;
+  let restUntil = 0;
+  const mode = $('rest-mode').value;
+  const reason = $('rest-reason').value.trim();
+
+  if (mode === 'days') {
+    const days = parseFloat($('rest-days').value);
+    if (!days || days <= 0) { alert('请输入有效的休息天数'); return; }
+    restUntil = Date.now() + days * 24 * 60 * 60 * 1000;
+  } else {
+    const start = $('rest-start').value;
+    const end = $('rest-end').value;
+    if (!start || !end) { alert('请选择开始和结束时间'); return; }
+    const endTs = new Date(end).getTime();
+    if (endTs <= Date.now()) { alert('结束时间必须晚于当前时间'); return; }
+    restUntil = endTs;
+  }
+
+  await fetch('/api/admin/groups/' + restingGroupId + '/rest', {
+    method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rest_until: restUntil, rest_reason: reason })
+  });
+  closeRestModal();
   loadAll();
 }
 

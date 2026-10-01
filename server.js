@@ -95,6 +95,10 @@ async function initDb() {
     );
   `);
 
+  // 兼容性：添加休息字段（如已存在则跳过）
+  try { await pool.query('ALTER TABLE groups ADD COLUMN rest_until BIGINT'); } catch {}
+  try { await pool.query('ALTER TABLE groups ADD COLUMN rest_reason TEXT'); } catch {}
+
   // 初始化超级管理员
   const envPassword = process.env.ADMIN_PASSWORD;
   const superPwd = envPassword || 'admin123';
@@ -455,6 +459,14 @@ app.post('/api/checkins', async (req, res) => {
     if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
     const g = group.rows[0];
 
+    // 休息期间禁止打卡
+    if (g.rest_until && Number(g.rest_until) > Date.now()) {
+      const restEnd = new Date(Number(g.rest_until));
+      const restInfo = `休息中，截止 ${restEnd.getFullYear()}/${restEnd.getMonth()+1}/${restEnd.getDate()} ${String(restEnd.getHours()).padStart(2,'0')}:${String(restEnd.getMinutes()).padStart(2,'0')}`;
+      if (g.rest_reason) return res.status(403).json({ error: `${restInfo}\n原因：${g.rest_reason}`, rest_until: g.rest_until, rest_reason: g.rest_reason });
+      return res.status(403).json({ error: restInfo, rest_until: g.rest_until, rest_reason: g.rest_reason });
+    }
+
     // 范围校验
     if (g.radius > 0 && g.center_lat != null && g.center_lng != null && lat != null && lng != null) {
       const dist = distance(lat, lng, g.center_lat, g.center_lng);
@@ -633,6 +645,22 @@ app.delete('/api/admin/groups/:id', auth, async (req, res) => {
     const id = parseInt(req.params.id);
     await pool.query('DELETE FROM groups WHERE id = $1', [id]);
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 设置群休息（rest_until 为休息截止时间戳，null/0 表示取消休息）
+app.post('/api/admin/groups/:id/rest', auth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { rest_until, rest_reason } = req.body || {};
+    const until = rest_until ? Number(rest_until) : null;
+    await pool.query(
+      'UPDATE groups SET rest_until = $1, rest_reason = $2 WHERE id = $3',
+      [until, rest_reason || null, id]
+    );
+    res.json({ ok: true, rest_until: until, rest_reason: rest_reason || null });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

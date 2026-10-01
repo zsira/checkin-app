@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=20261001">
 </head>
 <body>
   <div id="watermark" class="watermark"></div>
@@ -69,6 +69,12 @@
         </button>
         <input id="input-location-note" class="input" type="text" placeholder="选填：填写地点/公司名（如：XX公司前台）" maxlength="50" style="margin-top:12px">
         <div id="location-status" class="location-status"></div>
+      </div>
+
+      <!-- 休息通知 -->
+      <div id="rest-notice" class="rest-notice hidden" style="background:#fff3e0;border:1px solid #ffe0b2;border-radius:12px;padding:14px 16px;margin:12px 0;text-align:center">
+        <div style="font-size:18px;font-weight:700;color:#e65100;margin-bottom:6px">🛌 群组休息中</div>
+        <div id="rest-notice-text" style="color:#e65100;font-size:14px"></div>
       </div>
 
       <div class="range-info" id="range-info">
@@ -147,6 +153,6 @@
     <div id="toast" class="toast hidden"></div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20261001"></script>
 </body>
 </html>

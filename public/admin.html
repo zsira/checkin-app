@@ -255,6 +255,39 @@
     </div>
   </div>
 
+  <!-- 休息设置弹窗 -->
+  <div id="rest-modal" class="modal-mask hidden">
+    <div class="modal">
+      <h3>🛌 设置群休息</h3>
+      <p class="muted" style="font-size:13px;margin-bottom:12px">群组：<b id="rest-group-name"></b></p>
+      <div class="field">
+        <label>休息方式</label>
+        <select id="rest-mode" class="input" style="margin-bottom:8px">
+          <option value="days">按天数（从现在开始）</option>
+          <option value="range">按时间段</option>
+        </select>
+      </div>
+      <div id="rest-days-box" class="field">
+        <label>休息天数</label>
+        <input id="rest-days" class="input" type="number" min="0.5" step="0.5" value="1" placeholder="如 1 表示休息1天">
+      </div>
+      <div id="rest-range-box" class="field" style="display:none">
+        <label>开始时间</label>
+        <input id="rest-start" class="input" type="datetime-local" style="margin-bottom:8px">
+        <label>结束时间</label>
+        <input id="rest-end" class="input" type="datetime-local">
+      </div>
+      <div class="field">
+        <label>休息原因（可选，将推送给成员）</label>
+        <input id="rest-reason" class="input" type="text" placeholder="如：国庆假期、项目休整等">
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="rest-cancel">取消</button>
+        <button class="btn-save" id="rest-confirm">确认休息</button>
+      </div>
+    </div>
+  </div>
+
   <script src="admin.js?v=20261001"></script>
   <script>
     if ('serviceWorker' in navigator) {

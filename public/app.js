@@ -113,11 +113,17 @@ function init() {
     navigator.serviceWorker.register('service-worker.js').catch(() => {});
   }
 
-  // 防截屏：禁用右键、复制、拖拽
-  document.addEventListener('contextmenu', e => e.preventDefault());
-  document.addEventListener('copy', e => e.preventDefault());
-  document.addEventListener('cut', e => e.preventDefault());
-  document.addEventListener('dragstart', e => e.preventDefault());
+  // 请求通知权限（用于接收群休息等推送通知）
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().catch(() => {});
+  }
+
+  // 防截屏：禁用右键、复制、拖拽（输入框/文本域内不禁用）
+  const isEditable = (el) => el && el.closest && el.closest('input, textarea, [contenteditable="true"]');
+  document.addEventListener('contextmenu', e => { if (!isEditable(e.target)) e.preventDefault(); });
+  document.addEventListener('copy', e => { if (!isEditable(e.target)) e.preventDefault(); });
+  document.addEventListener('cut', e => { if (!isEditable(e.target)) e.preventDefault(); });
+  document.addEventListener('dragstart', e => { if (!isEditable(e.target)) e.preventDefault(); });
 
   // 生成水印（显示当前用户名，截屏可追溯）
   const name = localStorage.getItem('ci_name') || '';
@@ -255,7 +261,48 @@ async function loadGroupSettings() {
       $('group-name').textContent = g.name;
     }
     updateRangeDisplay();
+    // 休息状态处理
+    handleRestStatus(g.rest_until, g.rest_reason);
   } catch (e) {}
+}
+
+function handleRestStatus(restUntil, restReason) {
+  const notice = $('rest-notice');
+  const noticeText = $('rest-notice-text');
+  const btn = $('btn-checkin');
+  const until = restUntil ? Number(restUntil) : 0;
+  const now = Date.now();
+
+  if (until > now) {
+    // 休息中
+    const d = new Date(until);
+    const timeStr = `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    let text = `休息截止：${timeStr}`;
+    if (restReason) text += `\n原因：${restReason}`;
+    noticeText.textContent = text;
+    noticeText.style.whiteSpace = 'pre-line';
+    notice.classList.remove('hidden');
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'not-allowed';
+    btn.querySelector('.checkin-text').textContent = '休息中';
+    btn.querySelector('.checkin-sub').textContent = '暂停打卡';
+    // 推送通知（如果已授权）
+    if (Notification.permission === 'granted') {
+      new Notification('🛌 群组休息通知', {
+        body: `${state.groupName || '当前群组'}休息中，截止 ${timeStr}${restReason ? '\n原因：' + restReason : ''}`,
+        tag: 'rest-notice-' + state.groupCode,
+      });
+    }
+  } else {
+    // 未休息
+    notice.classList.add('hidden');
+    btn.disabled = false;
+    btn.style.opacity = '';
+    btn.style.cursor = '';
+    btn.querySelector('.checkin-text').textContent = '点击打卡';
+    btn.querySelector('.checkin-sub').textContent = '自动获取定位';
+  }
 }
 
 function updateRangeDisplay() {
@@ -336,8 +383,18 @@ async function doCheckin() {
   } catch (e) {
     status.className = 'location-status error';
     status.textContent = '提交失败：' + e.message;
+    // 如果是休息期间错误，刷新群组设置（会禁用打卡按钮）
+    if (/休息/i.test(e.message)) {
+      loadGroupSettings();
+    }
   } finally {
-    btn.disabled = false;
+    // 休息期间保持按钮禁用
+    const notice = $('rest-notice');
+    if (notice && !notice.classList.contains('hidden')) {
+      btn.disabled = true;
+    } else {
+      btn.disabled = false;
+    }
   }
 }
 
