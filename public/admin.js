@@ -107,15 +107,17 @@ function logout() {
 // ---------- 数据加载 ----------
 async function loadAll() {
   try {
-    const [gRes, cRes, sRes] = await Promise.all([
+    const [gRes, cRes, sRes, meRes] = await Promise.all([
       fetch('/api/admin/groups', { headers: authHeaders() }),
       fetch('/api/admin/checkins', { headers: authHeaders() }),
       fetch('/api/admin/stats/members', { headers: authHeaders() }),
+      fetch('/api/admin/me', { headers: authHeaders() }),
     ]);
-    if (gRes.status === 401 || cRes.status === 401) { logout(); return false; }
+    if (gRes.status === 401 || cRes.status === 401 || meRes.status === 401) { logout(); return false; }
     allGroups = await gRes.json();
     allCheckins = await cRes.json();
     memberStats = sRes.ok ? await sRes.json() : [];
+    if (meRes.ok) currentAdmin = await meRes.json();
     renderStats();
     renderGroups();
     renderPersons();

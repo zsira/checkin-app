@@ -310,6 +310,11 @@ function auth(req, res, next) {
   next();
 }
 
+// 获取当前登录管理员信息
+app.get('/api/admin/me', auth, (req, res) => {
+  res.json({ username: req.admin.username, is_super: req.admin.is_super });
+});
+
 // 修改当前管理员密码
 app.put('/api/admin/password', auth, async (req, res) => {
   try {
