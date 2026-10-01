@@ -11,6 +11,34 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+// ---------- 四个固定打卡时段 ----------
+// 0=早上上班卡 07:30，1=中午下班卡 12:00，2=下午上班卡 13:30，3=下午下班卡 18:00
+const PUNCH_SLOTS = [
+  { type: 0, short: '早上班', name: '早上上班卡', time: '07:30', icon: '🌅' },
+  { type: 1, short: '午下班', name: '中午下班卡', time: '12:00', icon: '🍱' },
+  { type: 2, short: '午上班', name: '下午上班卡', time: '13:30', icon: '☀️' },
+  { type: 3, short: '晚下班', name: '下午下班卡', time: '18:00', icon: '🌙' },
+];
+function currentPunchSlot(date = new Date()) {
+  const mins = date.getHours() * 60 + date.getMinutes();
+  if (mins < 9 * 60 + 45) return 0;
+  if (mins < 12 * 60 + 45) return 1;
+  if (mins < 15 * 60 + 45) return 2;
+  return 3;
+}
+function punchSlotOf(r) {
+  if (r.punch_type != null) return Number(r.punch_type);
+  return currentPunchSlot(new Date(Number(r.created_at)));
+}
+function todayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+}
+function dayKeyOf(ts) {
+  const d = new Date(Number(ts));
+  return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+}
+
 // ---------- 引导文案 ----------
 const GUIDE_CONTENT = {
   install: {
@@ -191,6 +219,10 @@ function bindEvents() {
     $('leave-range-box').style.display = mode === 'range' ? '' : 'none';
   };
 
+  // 每分钟刷新当前卡种显示
+  updateCurrentPunch();
+  setInterval(updateCurrentPunch, 60000);
+
   // 打卡范围
   $('btn-set-range').onclick = openRangeModal;
   $('btn-set-range2').onclick = openRangeModal;
@@ -247,6 +279,7 @@ function enterGroup(code, name) {
   $('group-name').textContent = name || '群组 ' + code;
   $('group-code-label').textContent = code;
   showView('main');
+  updateCurrentPunch();
   loadRecords();
   loadLeaves();
   loadGroupSettings();
@@ -388,8 +421,14 @@ async function doCheckin() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     status.className = 'location-status success';
-    status.textContent = '✓ 打卡成功！';
-    toast('打卡成功 🎉');
+    const punchName = data.punch_name || '';
+    if (data.duplicated) {
+      status.textContent = `✓ ${punchName}已打过卡（重复记录）`;
+      toast(`${punchName}今天已打过卡`);
+    } else {
+      status.textContent = `✓ ${punchName} 打卡成功！`;
+      toast(`${punchName}打卡成功 🎉`);
+    }
     loadRecords();
   } catch (e) {
     status.className = 'location-status error';
@@ -480,6 +519,8 @@ async function reverseGeocode(lat, lng) {
 }
 
 // ---------- 记录列表 ----------
+let myRecords = [];
+
 async function loadRecords() {
   if (!state.groupCode) return;
   try {
@@ -487,10 +528,43 @@ async function loadRecords() {
     const res = await fetch('/api/groups/' + encodeURIComponent(state.groupCode) + '/checkins?user_name=' + encodeURIComponent(state.userName));
     const rows = await res.json();
     if (!res.ok) throw new Error(rows.error);
+    myRecords = rows;
     renderRecords(rows);
+    renderPunchProgress(rows);
   } catch (e) {
     console.error(e);
   }
+}
+
+// 顶部显示当前应打卡种
+function updateCurrentPunch() {
+  const box = $('current-punch');
+  if (!box) return;
+  // 仅在主页可见时更新
+  const mainView = document.getElementById('view-main');
+  if (mainView && mainView.classList.contains('hidden')) return;
+  const slot = PUNCH_SLOTS[currentPunchSlot()];
+  box.innerHTML = `当前应打：<span style="color:#e67e22">${slot.icon} ${slot.name}（${slot.time}）</span>`;
+}
+
+// 今日四次打卡进度
+function renderPunchProgress(rows) {
+  const box = $('punch-progress');
+  if (!box) return;
+  const tk = todayKey();
+  const done = new Set();
+  rows.forEach(r => {
+    if (dayKeyOf(r.created_at) === tk) done.add(punchSlotOf(r));
+  });
+  box.innerHTML = PUNCH_SLOTS.map(s => {
+    const ok = done.has(s.type);
+    return `<div style="flex:1;text-align:center;padding:8px 2px;border-radius:10px;font-size:12px;
+      background:${ok ? '#e8f5e9' : '#f5f5f5'};color:${ok ? '#2e7d32' : '#999'};border:1px solid ${ok ? '#a5d6a7' : '#eee'}">
+      <div style="font-size:16px">${ok ? '✅' : s.icon}</div>
+      <div style="margin-top:2px;font-weight:600">${s.short}</div>
+      <div>${s.time}</div>
+    </div>`;
+  }).join('');
 }
 
 function renderRecords(rows) {
@@ -502,6 +576,8 @@ function renderRecords(rows) {
   list.innerHTML = rows.map(r => {
     const initial = (r.user_name || '?').charAt(0).toUpperCase();
     const time = new Date(Number(r.created_at)).toLocaleString('zh-CN');
+    const slot = PUNCH_SLOTS[punchSlotOf(r)];
+    const slotTag = `<span style="display:inline-block;background:#eef2ff;color:#4f46e5;border-radius:8px;padding:1px 7px;font-size:12px;margin-right:6px">${slot.icon} ${slot.name}</span>`;
     const addr = r.address
       ? `<div class="record-addr">📍 ${escapeHtml(r.address)}</div>`
       : (r.lat != null ? `<div class="record-addr"><a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank">📍 ${r.lat.toFixed(5)}, ${r.lng.toFixed(5)}</a></div>` : '');
@@ -509,7 +585,7 @@ function renderRecords(rows) {
       <div class="record-item">
         <div class="record-avatar">${escapeHtml(initial)}</div>
         <div class="record-body">
-          <div class="record-user">${escapeHtml(r.user_name)}</div>
+          <div class="record-user">${slotTag}${escapeHtml(r.user_name)}</div>
           <div class="record-time">${time}</div>
           ${addr}
         </div>

@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
-  <link rel="stylesheet" href="style.css?v=20261001">
+  <link rel="stylesheet" href="style.css?v=20261002">
 </head>
 <body>
   <div id="watermark" class="watermark"></div>
@@ -62,6 +62,7 @@
       </header>
 
       <div class="checkin-area">
+        <div id="current-punch" style="text-align:center;margin-bottom:10px;font-size:15px;color:var(--primary);font-weight:600"></div>
         <button id="btn-checkin" class="checkin-btn">
           <div class="checkin-icon">📍</div>
           <div class="checkin-text">点击打卡</div>
@@ -69,6 +70,8 @@
         </button>
         <input id="input-location-note" class="input" type="text" placeholder="选填：填写地点/公司名（如：XX公司前台）" maxlength="50" style="margin-top:12px">
         <div id="location-status" class="location-status"></div>
+        <!-- 今日四次打卡进度 -->
+        <div id="punch-progress" style="display:flex;justify-content:space-between;gap:6px;margin-top:14px"></div>
       </div>
 
       <!-- 休息通知 -->
@@ -186,6 +189,6 @@
     <div id="toast" class="toast hidden"></div>
   </div>
 
-  <script src="app.js?v=20261001"></script>
+  <script src="app.js?v=20261002"></script>
 </body>
 </html>

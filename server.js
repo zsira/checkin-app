@@ -78,6 +78,7 @@ async function initDb() {
       lng DOUBLE PRECISION,
       address TEXT,
       accuracy DOUBLE PRECISION,
+      punch_type SMALLINT,
       created_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_checkins_group ON checkins(group_id);
@@ -108,6 +109,8 @@ async function initDb() {
   // 兼容性：添加休息字段（如已存在则跳过）
   try { await pool.query('ALTER TABLE groups ADD COLUMN rest_until BIGINT'); } catch {}
   try { await pool.query('ALTER TABLE groups ADD COLUMN rest_reason TEXT'); } catch {}
+  // 兼容性：打卡记录添加卡种字段（0早上班 1午下班 2午上班 3晚下班）
+  try { await pool.query('ALTER TABLE checkins ADD COLUMN punch_type SMALLINT'); } catch {}
 
   // 初始化超级管理员
   const envPassword = process.env.ADMIN_PASSWORD;
@@ -151,6 +154,28 @@ function now() { return Date.now(); }
 function dayKey(ts) {
   const d = new Date(Number(ts));
   return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+}
+
+// 固定四个打卡时段（标准时间点）
+// 0=早上上班卡 07:30，1=中午下班卡 12:00，2=下午上班卡 13:30，3=下午下班卡 18:00
+const PUNCH_SLOTS = [
+  { type: 0, name: '早上上班卡', time: '07:30' },
+  { type: 1, name: '中午下班卡', time: '12:00' },
+  { type: 2, name: '下午上班卡', time: '13:30' },
+  { type: 3, name: '下午下班卡', time: '18:00' },
+];
+// 按相邻标准时间点的中点划分归属窗口：09:45 / 12:45 / 15:45
+function getPunchSlot(date = new Date()) {
+  const mins = date.getHours() * 60 + date.getMinutes();
+  if (mins < 9 * 60 + 45) return 0;        // < 09:45 → 早上上班卡
+  if (mins < 12 * 60 + 45) return 1;       // < 12:45 → 中午下班卡
+  if (mins < 15 * 60 + 45) return 2;       // < 15:45 → 下午上班卡
+  return 3;                                 // ≥ 15:45 → 下午下班卡
+}
+// 获取一条打卡记录所属卡种（兼容旧数据：无 punch_type 时按时间推断）
+function slotOf(checkin) {
+  if (checkin.punch_type != null) return Number(checkin.punch_type);
+  return getPunchSlot(new Date(Number(checkin.created_at)));
 }
 
 // 根据请假记录生成请假日期集合（Set of dayKey）
@@ -530,13 +555,20 @@ app.post('/api/checkins', async (req, res) => {
 
     const isCoord = /^\-?\d+\.\d+,\s*\-?\d+\.\d+$/.test(address || '');
     const displayAddr = (address && !isCoord) ? address : `${lat?.toFixed(5)}, ${lng?.toFixed(5)}`;
+    const punchType = getPunchSlot(new Date());
+    // 查询今天该卡种是否已打过
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const dup = await pool.query(
+      'SELECT id FROM checkins WHERE group_id = $1 AND user_name = $2 AND punch_type = $3 AND created_at >= $4 LIMIT 1',
+      [g.id, userName.trim(), punchType, todayStart.getTime()]
+    );
     const info = await pool.query(
-      `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [g.id, userName.trim(), lat ?? null, lng ?? null, displayAddr, accuracy ?? null, now()]
+      `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, punch_type, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [g.id, userName.trim(), lat ?? null, lng ?? null, displayAddr, accuracy ?? null, punchType, now()]
     );
     const checkin = await pool.query('SELECT * FROM checkins WHERE id = $1', [info.rows[0].id]);
-    res.json(checkin.rows[0]);
+    res.json({ ...checkin.rows[0], punch_name: PUNCH_SLOTS[punchType].name, punch_time: PUNCH_SLOTS[punchType].time, duplicated: dup.rows.length > 0 });
 
     // 后台异步获取详细地址
     if (isCoord && lat != null && lng != null) {
@@ -646,7 +678,7 @@ app.get('/api/admin/groups', auth, async (req, res) => {
 app.get('/api/admin/stats/members', auth, async (req, res) => {
   try {
     const rows = await pool.query(
-      `SELECT c.user_name, g.name AS group_name, g.code AS group_code, g.id AS group_id, c.created_at
+      `SELECT c.user_name, g.name AS group_name, g.code AS group_code, g.id AS group_id, c.created_at, c.punch_type
        FROM checkins c JOIN groups g ON c.group_id = g.id
        ORDER BY c.created_at DESC`
     );
@@ -671,13 +703,16 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
       }
       const p = map.get(key);
       const d = dk(r.created_at);
-      p.days.set(d, (p.days.get(d) || 0) + 1);
+      // 每天记录已打卡的时段集合（同天同时段多次打卡只算一次）
+      if (!p.days.has(d)) p.days.set(d, new Set());
+      p.days.get(d).add(slotOf(r));
       p.totalCheckins++;
       if (r.created_at < p.first) p.first = r.created_at;
       if (r.created_at > p.last) p.last = r.created_at;
     });
     const result = Array.from(map.values()).map(p => {
-      const fullDays = Array.from(p.days.values()).filter(c => c >= 4).length;
+      // 完整卡：当天 4 个时段（早上班/午下班/午上班/晚下班）全部打卡
+      const fullDays = Array.from(p.days.values()).filter(slots => slots.size >= 4).length;
       const checkinDays = p.days.size;
       const key = p.group_code + '|' + p.user_name;
       const leaveDates = leaveMap.get(key) || new Set();
@@ -833,7 +868,7 @@ app.put('/api/admin/groups/:id', auth, async (req, res) => {
 app.get('/api/admin/export', auth, async (req, res) => {
   try {
     const rows = await pool.query(
-      `SELECT c.created_at, c.user_name, g.name AS group_name, g.code AS group_code
+      `SELECT c.created_at, c.user_name, c.punch_type, g.name AS group_name, g.code AS group_code
        FROM checkins c JOIN groups g ON c.group_id = g.id
        ORDER BY c.created_at DESC`
     );
@@ -853,10 +888,12 @@ app.get('/api/admin/export', auth, async (req, res) => {
     rows.rows.forEach(r => {
       const key = r.group_code + '|' + r.user_name;
       if (!map.has(key)) {
-        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Set(), total: 0, first: r.created_at, last: r.created_at });
+        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), total: 0, first: r.created_at, last: r.created_at });
       }
       const p = map.get(key);
-      p.days.add(dk(r.created_at));
+      const d = dk(r.created_at);
+      if (!p.days.has(d)) p.days.set(d, new Set());
+      p.days.get(d).add(slotOf(r));
       p.total++;
       if (r.created_at < p.first) p.first = r.created_at;
       if (r.created_at > p.last) p.last = r.created_at;
@@ -872,9 +909,12 @@ app.get('/api/admin/export', auth, async (req, res) => {
         if (p.days.has(k) || leaveDates.has(k)) continue;
         absentDays++;
       }
+      // 完整卡天数：当天 4 个时段齐全
+      const fullDays = Array.from(p.days.values()).filter(slots => slots.size >= 4).length;
       return {
         user_name: p.user_name, group_name: p.group_name,
-        checkin_days: p.days.size, absent_days: absentDays,
+        checkin_days: p.days.size, full_days: fullDays,
+        absent_days: absentDays,
         leave_days: leaveDates.size, total_checkins: p.total,
       };
     });
@@ -883,20 +923,21 @@ app.get('/api/admin/export', auth, async (req, res) => {
       const s = v == null ? '' : String(v);
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
-    const headers = ['人员', '所属群组', '打卡天数', '缺卡天数', '请假天数', '打卡总数', '缺卡总数'];
+    const headers = ['人员', '所属群组', '打卡天数', '完整卡天数', '缺卡天数', '请假天数', '打卡总数', '缺卡总数'];
     const lines = [headers.join(',')];
     for (const p of stats) {
       lines.push([
         p.user_name, p.group_name,
-        p.checkin_days, p.absent_days, p.leave_days,
+        p.checkin_days, p.full_days, p.absent_days, p.leave_days,
         p.total_checkins, p.absent_days
       ].map(escapeCsv).join(','));
     }
     const sumCheckinDays = stats.reduce((s, p) => s + p.checkin_days, 0);
+    const sumFullDays = stats.reduce((s, p) => s + p.full_days, 0);
     const sumAbsent = stats.reduce((s, p) => s + p.absent_days, 0);
     const sumLeave = stats.reduce((s, p) => s + p.leave_days, 0);
     const sumTotal = stats.reduce((s, p) => s + p.total_checkins, 0);
-    lines.push(['合计', '', sumCheckinDays, sumAbsent, sumLeave, sumTotal, sumAbsent].map(escapeCsv).join(','));
+    lines.push(['合计', '', sumCheckinDays, sumFullDays, sumAbsent, sumLeave, sumTotal, sumAbsent].map(escapeCsv).join(','));
 
     const csv = '\uFEFF' + lines.join('\n');
     const filename = `打卡统计_${new Date().toISOString().slice(0, 10)}.csv`;

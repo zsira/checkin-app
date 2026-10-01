@@ -259,6 +259,7 @@ function renderPersons() {
         <tr>
           <td><b>${esc(p.user_name)}</b></td>
           <td>${p.checkin_days} 天</td>
+          <td><b style="color:#4f46e5">${p.full_days || 0} 天</b></td>
           <td><b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days} 天</b></td>
           <td style="color:#e67e22">${p.leave_days || 0} 天</td>
           <td>${p.total_checkins} 次</td>
@@ -269,7 +270,7 @@ function renderPersons() {
         <h3 style="font-size:15px;margin-bottom:8px;color:var(--primary)">${esc(g.group_name)} <span class="tag">${esc(g.group_code)}</span></h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>人员</th><th>打卡天数</th><th>缺卡天数</th><th>请假天数</th><th>总计</th><th>操作</th></tr></thead>
+            <thead><tr><th>人员</th><th>打卡天数</th><th>完整卡天数</th><th>缺卡天数</th><th>请假天数</th><th>总计</th><th>操作</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
