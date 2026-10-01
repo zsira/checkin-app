@@ -535,6 +535,17 @@ app.put('/api/admin/checkins/:id', auth, async (req, res) => {
   }
 });
 
+// 删除群组（同时删除该群组所有打卡记录）
+app.delete('/api/admin/groups/:id', auth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    await pool.query('DELETE FROM groups WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // 编辑群组信息（名称、中心点、范围、打卡时间）
 app.put('/api/admin/groups/:id', auth, async (req, res) => {
   try {

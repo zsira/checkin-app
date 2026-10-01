@@ -169,6 +169,7 @@ function renderGroups() {
         <td>
           <button class="btn-edit" onclick="inviteGroup(${g.id})">📨 邀请</button>
           <button class="btn-edit" onclick="editGroup(${g.id})">✏️ 编辑</button>
+          <button class="btn-del" onclick="delGroup(${g.id},'${esc(g.name).replace(/'/g, "\\'")}')">🗑️ 删除</button>
         </td>
       </tr>`;
   }).join('');
@@ -442,6 +443,13 @@ async function delAdmin(id, name) {
   if (!confirm(`确定删除管理员「${name}」？`)) return;
   await fetch('/api/admin/admins/' + id, { method: 'DELETE', headers: authHeaders() });
   loadAdmins();
+}
+
+// ---------- 删除群组 ----------
+async function delGroup(id, name) {
+  if (!confirm(`确定删除群组「${name}」？\n该群组的所有打卡记录将一并删除，且不可恢复！`)) return;
+  await fetch('/api/admin/groups/' + id, { method: 'DELETE', headers: authHeaders() });
+  loadAll();
 }
 
 // ---------- 创建群组 ----------
