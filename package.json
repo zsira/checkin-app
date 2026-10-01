@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "带自动定位与邀请功能的打卡 PWA 应用",
   "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js"
   },
