@@ -69,7 +69,8 @@
   <div id="login-screen" class="login-wrap">
     <div class="login-card">
       <h1>🔐 管理后台登录</h1>
-      <p class="muted">请输入管理员密码</p>
+      <p class="muted">请输入管理员账号和密码</p>
+      <input id="login-username" class="input" type="text" placeholder="管理员账号" autocomplete="username" style="margin-bottom:12px" value="admin">
       <input id="login-password" class="input" type="password" placeholder="管理员密码" autocomplete="current-password">
       <div id="login-error" style="color:var(--danger);font-size:13px;margin:8px 0;min-height:18px"></div>
       <button id="btn-login" class="btn btn-primary">登录</button>
@@ -90,6 +91,20 @@
 
     <div class="stats" id="stats"></div>
 
+    <!-- 管理员管理（仅超管可见） -->
+    <div class="panel" id="panel-admins" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">🛡️ 管理员管理</h2>
+        <button id="btn-add-admin" class="btn-export" style="background:var(--primary)">+ 添加管理员</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>账号</th><th>角色</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody id="admins-body"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="panel">
       <h2>👥 人员管理</h2>
       <div class="filter-row">
@@ -97,7 +112,7 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>成员</th><th>打卡次数</th><th>参与群组</th><th>首次打卡</th><th>最近打卡</th><th>操作</th></tr></thead>
+          <thead><tr><th>成员</th><th>群组</th><th>打卡次数</th><th>打卡天数</th><th>满勤天数<br><small style="font-weight:normal;color:var(--muted)">(每天≥4次)</small></th><th>最近打卡</th><th>操作</th></tr></thead>
           <tbody id="persons-body"></tbody>
         </table>
       </div>
@@ -107,7 +122,7 @@
       <h2>所有群组</h2>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>群组名</th><th>邀请码</th><th>打卡范围</th><th>打卡数</th><th>创建时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>群组名</th><th>邀请码</th><th>打卡范围</th><th>打卡时段</th><th>打卡数</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody id="groups-body"></tbody>
         </table>
       </div>
@@ -140,6 +155,26 @@
       <div class="modal-actions">
         <button class="btn-cancel" id="modal-cancel">取消</button>
         <button class="btn-save" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加管理员弹窗 -->
+  <div id="admin-modal" class="modal-mask hidden">
+    <div class="modal">
+      <h3>添加管理员</h3>
+      <div class="field">
+        <label>管理员账号</label>
+        <input id="adm-username" type="text" placeholder="登录账号">
+      </div>
+      <div class="field">
+        <label>密码（至少6位）</label>
+        <input id="adm-password" type="password" placeholder="登录密码">
+      </div>
+      <div id="adm-error" style="color:var(--danger);font-size:13px;min-height:18px"></div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="adm-cancel">取消</button>
+        <button class="btn-save" id="adm-save">确认添加</button>
       </div>
     </div>
   </div>

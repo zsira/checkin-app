@@ -6,6 +6,8 @@ function authHeaders() { return { 'Authorization': 'Bearer ' + getToken() }; }
 
 let allCheckins = [];
 let allGroups = [];
+let memberStats = [];
+let currentAdmin = null; // { username, is_super }
 let refreshTimer = null;
 let editing = null; // { type: 'group'|'checkin', id, data }
 
@@ -41,6 +43,11 @@ function init() {
   $('pwd-cancel').onclick = closePwdModal;
   $('pwd-save').onclick = changePassword;
 
+  // 管理员管理
+  $('btn-add-admin').onclick = openAdminModal;
+  $('adm-cancel').onclick = closeAdminModal;
+  $('adm-save').onclick = addAdmin;
+
   ['filter-group', 'filter-user', 'filter-keyword', 'filter-person'].forEach(id => {
     $(id).addEventListener('input', () => { renderCheckins(); renderPersons(); });
   });
@@ -59,17 +66,19 @@ function showAdmin() {
 }
 
 async function doLogin() {
+  const username = $('login-username').value.trim() || 'admin';
   const password = $('login-password').value;
   $('login-error').textContent = '';
   try {
     const res = await fetch('/api/admin/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ username, password }),
     });
     const data = await res.json();
     if (!res.ok) { $('login-error').textContent = data.error || '登录失败'; return; }
     localStorage.setItem(TOKEN_KEY, data.token);
+    currentAdmin = { username: data.username, is_super: data.is_super };
     showAdmin();
     await loadAll();
   } catch (e) {
@@ -85,17 +94,26 @@ function logout() {
 // ---------- 数据加载 ----------
 async function loadAll() {
   try {
-    const [gRes, cRes] = await Promise.all([
+    const [gRes, cRes, sRes] = await Promise.all([
       fetch('/api/admin/groups', { headers: authHeaders() }),
       fetch('/api/admin/checkins', { headers: authHeaders() }),
+      fetch('/api/admin/stats/members', { headers: authHeaders() }),
     ]);
     if (gRes.status === 401 || cRes.status === 401) { logout(); return false; }
     allGroups = await gRes.json();
     allCheckins = await cRes.json();
+    memberStats = sRes.ok ? await sRes.json() : [];
     renderStats();
     renderGroups();
     renderPersons();
     renderCheckins();
+    // 超管功能
+    if (currentAdmin && currentAdmin.is_super) {
+      $('panel-admins').style.display = '';
+      loadAdmins();
+    } else {
+      $('panel-admins').style.display = 'none';
+    }
     return true;
   } catch (e) {
     console.error(e);
@@ -120,16 +138,21 @@ function renderStats() {
 
 function renderGroups() {
   const body = $('groups-body');
-  if (!allGroups.length) { body.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px">暂无群组</td></tr>'; return; }
+  if (!allGroups.length) { body.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">暂无群组</td></tr>'; return; }
   body.innerHTML = allGroups.map(g => {
     const range = g.radius > 0 && g.center_lat != null
       ? `${g.center_lat.toFixed(4)}, ${g.center_lng.toFixed(4)} · ${g.radius}m`
       : '<span style="color:var(--muted)">不限制</span>';
+    const times = (g.checkin_times || []);
+    const timesText = times.length
+      ? times.map(t => `${t.start}-${t.end}`).join('<br>')
+      : '<span style="color:var(--muted)">任意时间</span>';
     return `
       <tr>
         <td><b>${esc(g.name)}</b></td>
         <td><span class="tag">${esc(g.code)}</span></td>
         <td>${range}</td>
+        <td style="font-size:12px">${timesText}</td>
         <td>${g.checkin_count}</td>
         <td>${fmtTime(g.created_at)}</td>
         <td><button class="btn-edit" onclick="editGroup(${g.id})">✏️ 编辑</button></td>
@@ -139,31 +162,22 @@ function renderGroups() {
 
 function renderPersons() {
   const fp = $('filter-person')?.value.trim().toLowerCase() || '';
-  const map = new Map();
-  allCheckins.forEach(c => {
-    const key = c.user_name;
-    if (!map.has(key)) {
-      map.set(key, { name: key, count: 0, groups: new Set(), first: c.created_at, last: c.created_at });
-    }
-    const p = map.get(key);
-    p.count++;
-    p.groups.add(c.group_name);
-    if (c.created_at < p.first) p.first = c.created_at;
-    if (c.created_at > p.last) p.last = c.created_at;
-  });
-  let persons = Array.from(map.values()).sort((a, b) => b.count - a.count);
-  if (fp) persons = persons.filter(p => p.name.toLowerCase().includes(fp));
+  // 使用 memberStats（按群组+用户分组，含打卡天数）
+  let persons = memberStats.slice();
+  if (fp) persons = persons.filter(p => p.user_name.toLowerCase().includes(fp));
+  persons.sort((a, b) => b.full_days - a.full_days || b.total_checkins - a.total_checkins);
 
   const body = $('persons-body');
-  if (!persons.length) { body.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px">暂无成员</td></tr>'; return; }
+  if (!persons.length) { body.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">暂无成员</td></tr>'; return; }
   body.innerHTML = persons.map(p => `
     <tr>
-      <td><b>${esc(p.name)}</b></td>
-      <td><span class="tag">${p.count} 次</span></td>
-      <td>${Array.from(p.groups).map(g => esc(g)).join('、')}</td>
-      <td>${fmtTime(p.first)}</td>
-      <td>${fmtTime(p.last)}</td>
-      <td><button class="btn-del" onclick="delPerson('${esc(p.name).replace(/'/g, "\\'")}')">清除记录</button></td>
+      <td><b>${esc(p.user_name)}</b></td>
+      <td><span class="tag">${esc(p.group_name)}</span></td>
+      <td>${p.total_checkins} 次</td>
+      <td>${p.checkin_days} 天</td>
+      <td><b style="color:var(--success)">${p.full_days} 天</b></td>
+      <td>${fmtTime(p.last_checkin)}</td>
+      <td><button class="btn-del" onclick="delPerson('${esc(p.user_name).replace(/'/g, "\\'")}')">清除记录</button></td>
     </tr>
   `).join('');
 }
@@ -235,14 +249,39 @@ function editGroup(id) {
   const g = allGroups.find(x => x.id === id);
   if (!g) return;
   editing = { type: 'group', id, data: { ...g } };
+  const times = g.checkin_times || [];
+  const timesHtml = times.map((t, i) => renderTimeRow(i, t)).join('');
   $('modal-title').textContent = '编辑群组';
   $('modal-fields').innerHTML = `
     <div class="field"><label>群组名称</label><input id="ef-name" value="${esc(g.name)}"></div>
     <div class="field"><label>中心点纬度（不限制留空）</label><input id="ef-lat" value="${g.center_lat ?? ''}" placeholder="如 22.951"></div>
     <div class="field"><label>中心点经度（不限制留空）</label><input id="ef-lng" value="${g.center_lng ?? ''}" placeholder="如 113.877"></div>
     <div class="field"><label>打卡范围（米，0=不限制）</label><input id="ef-radius" type="number" value="${g.radius ?? 0}"></div>
+    <div class="field">
+      <label>打卡时间段（留空=不限制时间）</label>
+      <div id="time-rows">${timesHtml || '<p class="muted" style="font-size:12px;margin:4px 0">未设置，任意时间可打卡</p>'}</div>
+      <button type="button" class="btn btn-secondary" style="margin-top:8px;padding:6px 12px;font-size:13px" onclick="addTimeRow()">+ 添加时段</button>
+    </div>
   `;
   $('edit-modal').classList.remove('hidden');
+}
+
+function renderTimeRow(i, t) {
+  return `
+    <div class="time-row" data-idx="${i}" style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <input type="time" value="${t?.start || '08:00'}" style="flex:1;padding:8px;border:1.5px solid var(--border);border-radius:8px;font-size:14px">
+      <span style="color:var(--muted)">至</span>
+      <input type="time" value="${t?.end || '09:00'}" style="flex:1;padding:8px;border:1.5px solid var(--border);border-radius:8px;font-size:14px">
+      <button type="button" class="btn-del" style="color:var(--danger);background:none;border:none;cursor:pointer;font-size:18px" onclick="this.parentElement.remove()">×</button>
+    </div>`;
+}
+
+function addTimeRow() {
+  const container = $('time-rows');
+  const idx = container.children.length;
+  // 清除"未设置"提示
+  if (container.querySelector('.muted')) container.innerHTML = '';
+  container.insertAdjacentHTML('beforeend', renderTimeRow(idx, { start: '08:00', end: '09:00' }));
 }
 
 function editCheckin(id) {
@@ -271,7 +310,16 @@ async function saveEdit() {
       const lng = $('ef-lng').value.trim();
       const radius = parseInt($('ef-radius').value) || 0;
       if (!name) { alert('群组名称不能为空'); return; }
-      const body = { name, radius };
+      // 收集打卡时间段
+      const timeRows = document.querySelectorAll('.time-row');
+      const checkin_times = [];
+      timeRows.forEach(row => {
+        const inputs = row.querySelectorAll('input[type="time"]');
+        if (inputs.length === 2) {
+          checkin_times.push({ start: inputs[0].value, end: inputs[1].value });
+        }
+      });
+      const body = { name, radius, checkin_times };
       if (lat && lng) { body.center_lat = parseFloat(lat); body.center_lng = parseFloat(lng); }
       else { body.center_lat = null; body.center_lng = null; }
       await fetch('/api/admin/groups/' + editing.id, {
@@ -328,6 +376,58 @@ async function changePassword() {
   } catch (e) {
     $('pwd-error').textContent = '网络错误';
   }
+}
+
+// ---------- 管理员管理 ----------
+async function loadAdmins() {
+  try {
+    const res = await fetch('/api/admin/admins', { headers: authHeaders() });
+    if (!res.ok) return;
+    const admins = await res.json();
+    $('admins-body').innerHTML = admins.map(a => `
+      <tr>
+        <td><b>${esc(a.username)}</b></td>
+        <td>${a.is_super ? '<span class="tag" style="background:#fef3c7;color:#d97706">超级管理员</span>' : '<span class="tag">管理员</span>'}</td>
+        <td>${fmtTime(a.created_at)}</td>
+        <td>${a.is_super ? '-' : `<button class="btn-del" onclick="delAdmin(${a.id},'${esc(a.username)}')">删除</button>`}</td>
+      </tr>
+    `).join('');
+  } catch (e) {}
+}
+function openAdminModal() {
+  $('adm-username').value = '';
+  $('adm-password').value = '';
+  $('adm-error').textContent = '';
+  $('admin-modal').classList.remove('hidden');
+}
+function closeAdminModal() {
+  $('admin-modal').classList.add('hidden');
+}
+async function addAdmin() {
+  const username = $('adm-username').value.trim();
+  const password = $('adm-password').value.trim();
+  $('adm-error').textContent = '';
+  if (!username) { $('adm-error').textContent = '请输入账号'; return; }
+  if (password.length < 6) { $('adm-error').textContent = '密码至少 6 位'; return; }
+  try {
+    const res = await fetch('/api/admin/admins', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) { $('adm-error').textContent = data.error || '添加失败'; return; }
+    closeAdminModal();
+    loadAdmins();
+    alert('管理员添加成功');
+  } catch (e) {
+    $('adm-error').textContent = '网络错误';
+  }
+}
+async function delAdmin(id, name) {
+  if (!confirm(`确定删除管理员「${name}」？`)) return;
+  await fetch('/api/admin/admins/' + id, { method: 'DELETE', headers: authHeaders() });
+  loadAdmins();
 }
 
 init();

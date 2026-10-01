@@ -77,17 +77,36 @@ db.exec(`
     value TEXT
   );
 `);
-// 初始化密码：优先用环境变量，其次用数据库，最后默认 admin123
+// 管理员账号表（支持多管理员）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS admins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    is_super INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+`);
+// 初始化超级管理员
 const envPassword = process.env.ADMIN_PASSWORD;
+const superPwd = envPassword || 'admin123';
+const superAdmin = db.prepare('SELECT id FROM admins WHERE is_super = 1').get();
+if (!superAdmin) {
+  db.prepare('INSERT INTO admins (username, password, is_super, created_at) VALUES (?, ?, 1, ?)')
+    .run('admin', superPwd, Date.now());
+}
+// 兼容旧密码配置
 if (envPassword) {
-  db.prepare('INSERT OR REPLACE INTO admin_settings (key, value) VALUES (?, ?)').run('password', envPassword);
-} else if (!db.prepare('SELECT value FROM admin_settings WHERE key = ?').get('password')) {
-  db.prepare('INSERT INTO admin_settings (key, value) VALUES (?, ?)').run('password', 'admin123');
+  db.prepare('UPDATE admins SET password = ? WHERE is_super = 1').run(envPassword);
 }
-function getAdminPassword() {
-  const row = db.prepare('SELECT value FROM admin_settings WHERE key = ?').get('password');
-  return row ? row.value : 'admin123';
+function verifyAdmin(username, password) {
+  const row = db.prepare('SELECT * FROM admins WHERE username = ?').get(username);
+  if (!row || row.password !== password) return null;
+  return row;
 }
+
+// 为群组表添加打卡时间配置字段
+addColumnIfMissing('groups', 'checkin_times', 'TEXT');
 
 // ---------- 工具函数 ----------
 function genCode() {
@@ -171,33 +190,76 @@ function reverseGeocode(lat, lng) {
 }
 
 // ---------- 登录认证 ----------
-// 内存中的有效 token 集合
-const validTokens = new Set();
+// token -> 管理员信息
+const validTokens = new Map();
 
 app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body || {};
-  if (password !== getAdminPassword()) return res.status(401).json({ error: '密码错误' });
+  const { username, password } = req.body || {};
+  // 兼容旧版：只传密码时用 admin 账号
+  const uname = username || 'admin';
+  const admin = verifyAdmin(uname, password);
+  if (!admin) return res.status(401).json({ error: '用户名或密码错误' });
   const token = crypto.randomBytes(32).toString('hex');
-  validTokens.add(token);
-  res.json({ token });
+  validTokens.set(token, { id: admin.id, username: admin.username, is_super: admin.is_super });
+  res.json({ token, username: admin.username, is_super: admin.is_super });
 });
 
-// 修改管理员密码
+// 修改当前管理员密码
 app.put('/api/admin/password', auth, (req, res) => {
   const { oldPassword, newPassword } = req.body || {};
   if (!oldPassword || !newPassword) return res.status(400).json({ error: '请输入旧密码和新密码' });
   if (newPassword.length < 6) return res.status(400).json({ error: '新密码至少 6 位' });
-  if (oldPassword !== getAdminPassword()) return res.status(401).json({ error: '旧密码错误' });
-  db.prepare('UPDATE admin_settings SET value = ? WHERE key = ?').run(newPassword, 'password');
-  // 清除所有 token，强制重新登录
-  validTokens.clear();
+  const admin = req.admin;
+  const row = db.prepare('SELECT password FROM admins WHERE id = ?').get(admin.id);
+  if (!row || row.password !== oldPassword) return res.status(401).json({ error: '旧密码错误' });
+  db.prepare('UPDATE admins SET password = ? WHERE id = ?').run(newPassword, admin.id);
+  // 清除当前 token
+  validTokens.delete(req.token);
+  res.json({ ok: true });
+});
+
+// 管理员列表（仅超级管理员）
+app.get('/api/admin/admins', auth, (req, res) => {
+  if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
+  const rows = db.prepare('SELECT id, username, is_super, created_at FROM admins ORDER BY is_super DESC, id').all();
+  res.json(rows);
+});
+
+// 添加管理员（仅超级管理员）
+app.post('/api/admin/admins', auth, (req, res) => {
+  if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
+  const { username, password } = req.body || {};
+  if (!username || !username.trim()) return res.status(400).json({ error: '用户名不能为空' });
+  if (!password || password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+  try {
+    db.prepare('INSERT INTO admins (username, password, is_super, created_at) VALUES (?, ?, 0, ?)')
+      .run(username.trim(), password, Date.now());
+    res.json({ ok: true });
+  } catch (e) {
+    if (e.message.includes('UNIQUE')) return res.status(400).json({ error: '用户名已存在' });
+    res.status(500).json({ error: '创建失败' });
+  }
+});
+
+// 删除管理员（仅超级管理员，不能删自己）
+app.delete('/api/admin/admins/:id', auth, (req, res) => {
+  if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
+  const id = parseInt(req.params.id);
+  if (id === req.admin.id) return res.status(400).json({ error: '不能删除自己' });
+  const target = db.prepare('SELECT is_super FROM admins WHERE id = ?').get(id);
+  if (!target) return res.status(404).json({ error: '管理员不存在' });
+  if (target.is_super) return res.status(400).json({ error: '不能删除超级管理员' });
+  db.prepare('DELETE FROM admins WHERE id = ?').run(id);
   res.json({ ok: true });
 });
 
 function auth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : (req.query.token || '');
-  if (!validTokens.has(token)) return res.status(401).json({ error: '未登录' });
+  const admin = validTokens.get(token);
+  if (!admin) return res.status(401).json({ error: '未登录' });
+  req.admin = admin;
+  req.token = token;
   next();
 }
 
@@ -217,6 +279,7 @@ app.post('/api/groups', (req, res) => {
 app.get('/api/groups/:code', (req, res) => {
   const group = db.prepare('SELECT * FROM groups WHERE code = ?').get(req.params.code);
   if (!group) return res.status(404).json({ error: '群组不存在' });
+  try { group.checkin_times = JSON.parse(group.checkin_times || '[]'); } catch { group.checkin_times = []; }
   res.json(group);
 });
 
@@ -268,6 +331,26 @@ app.post('/api/checkins', (req, res) => {
     }
   }
 
+  // 打卡时间校验
+  try {
+    const times = JSON.parse(group.checkin_times || '[]');
+    if (times.length > 0) {
+      const now = new Date();
+      const curMins = now.getHours() * 60 + now.getMinutes();
+      const inWindow = times.some(t => {
+        const [sh, sm] = (t.start || '00:00').split(':').map(Number);
+        const [eh, em] = (t.end || '23:59').split(':').map(Number);
+        const startMins = sh * 60 + sm;
+        const endMins = eh * 60 + em;
+        return curMins >= startMins && curMins <= endMins;
+      });
+      if (!inWindow) {
+        const windows = times.map(t => `${t.start}-${t.end}`).join('、');
+        return res.status(403).json({ error: `不在打卡时间内，允许打卡时段：${windows}` });
+      }
+    }
+  } catch (e) {}
+
   // 先用前端传来的地址，立即返回不阻塞
   // 判断是否为经纬度格式（用户未手动填写地点）
   const isCoord = /^\-?\d+\.\d+,\s*\-?\d+\.\d+$/.test(address || '');
@@ -302,7 +385,50 @@ app.get('/api/admin/groups', auth, (req, res) => {
     `SELECT g.*, (SELECT COUNT(*) FROM checkins c WHERE c.group_id = g.id) AS checkin_count
      FROM groups g ORDER BY g.created_at DESC`
   ).all();
+  groups.forEach(g => {
+    try { g.checkin_times = JSON.parse(g.checkin_times || '[]'); } catch { g.checkin_times = []; }
+  });
   res.json(groups);
+});
+
+// 成员打卡统计（按群组、按天，4次打卡=1天）
+app.get('/api/admin/stats/members', auth, (req, res) => {
+  const rows = db.prepare(
+    `SELECT c.user_name, g.name AS group_name, g.code AS group_code, c.created_at
+     FROM checkins c JOIN groups g ON c.group_id = g.id
+     ORDER BY c.created_at DESC`
+  ).all();
+  // 按 群组+用户+日期 分组，统计每天打卡次数
+  const dayKey = (ts) => new Date(ts).toLocaleDateString('zh-CN');
+  const map = new Map(); // key: group|user -> { name, group, days: Set, totalCheckins }
+  rows.forEach(r => {
+    const key = r.group_code + '|' + r.user_name;
+    if (!map.has(key)) {
+      map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), totalCheckins: 0, first: r.created_at, last: r.created_at });
+    }
+    const p = map.get(key);
+    const dk = dayKey(r.created_at);
+    p.days.set(dk, (p.days.get(dk) || 0) + 1);
+    p.totalCheckins++;
+    if (r.created_at < p.first) p.first = r.created_at;
+    if (r.created_at > p.last) p.last = r.created_at;
+  });
+  // 打卡天数：每天打卡 >= 4 次才算 1 天
+  const result = Array.from(map.values()).map(p => {
+    const fullDays = Array.from(p.days.values()).filter(c => c >= 4).length;
+    const checkinDays = p.days.size; // 实际打卡的天数
+    return {
+      user_name: p.user_name,
+      group_name: p.group_name,
+      group_code: p.group_code,
+      total_checkins: p.totalCheckins,
+      checkin_days: checkinDays,
+      full_days: fullDays, // 满4次的天数
+      first_checkin: p.first,
+      last_checkin: p.last,
+    };
+  });
+  res.json(result);
 });
 
 app.get('/api/admin/checkins', auth, (req, res) => {
@@ -332,9 +458,9 @@ app.put('/api/admin/checkins/:id', auth, (req, res) => {
   res.json({ ok: true });
 });
 
-// 编辑群组信息（名称、中心点、范围）
+// 编辑群组信息（名称、中心点、范围、打卡时间）
 app.put('/api/admin/groups/:id', auth, (req, res) => {
-  const { name, center_lat, center_lng, radius, creator } = req.body;
+  const { name, center_lat, center_lng, radius, creator, checkin_times } = req.body;
   const fields = [];
   const values = [];
   if (name !== undefined) { fields.push('name = ?'); values.push(name); }
@@ -342,6 +468,7 @@ app.put('/api/admin/groups/:id', auth, (req, res) => {
   if (center_lng !== undefined) { fields.push('center_lng = ?'); values.push(center_lng); }
   if (radius !== undefined) { fields.push('radius = ?'); values.push(radius); }
   if (creator !== undefined) { fields.push('creator = ?'); values.push(creator); }
+  if (checkin_times !== undefined) { fields.push('checkin_times = ?'); values.push(JSON.stringify(checkin_times || [])); }
   if (!fields.length) return res.status(400).json({ error: '没有可更新的字段' });
   values.push(req.params.id);
   db.prepare(`UPDATE groups SET ${fields.join(', ')} WHERE id = ?`).run(...values);
