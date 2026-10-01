@@ -33,6 +33,7 @@ input, textarea {
   -moz-user-select: text;
   -ms-user-select: text;
   user-select: text;
+  -webkit-touch-callout: default;
 }
 
 /* 水印层 */

@@ -13,11 +13,11 @@ let editing = null; // { type: 'group'|'checkin', id, data }
 
 // ---------- 初始化 ----------
 function init() {
-  // 防截屏：禁用右键、复制（输入框除外）
-  const isInput = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
-  document.addEventListener('contextmenu', e => { if (!isInput(e.target)) e.preventDefault(); });
-  document.addEventListener('copy', e => { if (!isInput(e.target)) e.preventDefault(); });
-  document.addEventListener('cut', e => { if (!isInput(e.target)) e.preventDefault(); });
+  // 防截屏：禁用右键、复制（输入框/文本域内不禁用，保证可正常编辑删除）
+  const isEditable = (el) => el && el.closest && el.closest('input, textarea, [contenteditable="true"]');
+  document.addEventListener('contextmenu', e => { if (!isEditable(e.target)) e.preventDefault(); });
+  document.addEventListener('copy', e => { if (!isEditable(e.target)) e.preventDefault(); });
+  document.addEventListener('cut', e => { if (!isEditable(e.target)) e.preventDefault(); });
 
   // 管理后台水印
   setWatermark('管理员');
