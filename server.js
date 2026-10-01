@@ -562,6 +562,13 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
     const result = Array.from(map.values()).map(p => {
       const fullDays = Array.from(p.days.values()).filter(c => c >= 4).length;
       const checkinDays = p.days.size;
+      // 计算缺卡天数：首次到末次打卡之间的总天数 - 已打卡天数
+      const first = new Date(Number(p.first));
+      const last = new Date(Number(p.last));
+      first.setHours(0, 0, 0, 0);
+      last.setHours(0, 0, 0, 0);
+      const totalDays = Math.floor((last - first) / 86400000) + 1;
+      const absentDays = Math.max(0, totalDays - checkinDays);
       return {
         user_name: p.user_name,
         group_name: p.group_name,
@@ -569,6 +576,7 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
         total_checkins: p.totalCheckins,
         checkin_days: checkinDays,
         full_days: fullDays,
+        absent_days: absentDays,
         first_checkin: p.first,
         last_checkin: p.last,
       };

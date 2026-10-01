@@ -184,18 +184,16 @@ function renderPersons() {
   // 使用 memberStats（按群组+用户分组，含打卡天数）
   let persons = memberStats.slice();
   if (fp) persons = persons.filter(p => p.user_name.toLowerCase().includes(fp));
-  persons.sort((a, b) => b.full_days - a.full_days || b.total_checkins - a.total_checkins);
+  persons.sort((a, b) => b.checkin_days - a.checkin_days || b.total_checkins - a.total_checkins);
 
   const body = $('persons-body');
-  if (!persons.length) { body.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">暂无成员</td></tr>'; return; }
+  if (!persons.length) { body.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px">暂无成员</td></tr>'; return; }
   body.innerHTML = persons.map(p => `
     <tr>
-      <td><b>${esc(p.user_name)}</b></td>
-      <td><span class="tag">${esc(p.group_name)}</span></td>
-      <td>${p.total_checkins} 次</td>
+      <td><b>${esc(p.user_name)}</b><br><span class="tag" style="margin-top:2px">${esc(p.group_name)}</span></td>
       <td>${p.checkin_days} 天</td>
-      <td><b style="color:var(--success)">${p.full_days} 天</b></td>
-      <td>${fmtTime(p.last_checkin)}</td>
+      <td><b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days} 天</b></td>
+      <td>${p.total_checkins} 次</td>
       <td><button class="btn-del" onclick="delPerson('${esc(p.user_name).replace(/'/g, "\\'")}')">清除记录</button></td>
     </tr>
   `).join('');
