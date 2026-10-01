@@ -1,5 +1,5 @@
 const express = require('express');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
@@ -27,86 +27,89 @@ app.get('/manifest.json', (req, res) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- 数据库初始化 ----------
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'checkin.db');
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
+// ---------- 数据库初始化 (PostgreSQL) ----------
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  console.error('[错误] 未设置 DATABASE_URL 环境变量，无法连接 PostgreSQL。');
+  console.error('请在 Railway 环境变量中设置 DATABASE_URL 为 Supabase 的连接串。');
+}
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    center_lat REAL,
-    center_lng REAL,
-    radius INTEGER DEFAULT 0,
-    creator TEXT,
-    created_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS checkins (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id INTEGER NOT NULL,
-    user_name TEXT NOT NULL,
-    lat REAL,
-    lng REAL,
-    address TEXT,
-    accuracy REAL,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (group_id) REFERENCES groups(id)
-  );
-  CREATE INDEX IF NOT EXISTS idx_checkins_group ON checkins(group_id);
-  CREATE INDEX IF NOT EXISTS idx_checkins_time ON checkins(created_at);
-`);
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: DATABASE_URL && DATABASE_URL.includes('supabase')
+    ? { rejectUnauthorized: false }
+    : false,
+  max: 10,
+  idleTimeoutMillis: 30000,
+});
 
-// 迁移：为旧表添加字段（不存在时）
-function addColumnIfMissing(table, col, def) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
-  if (!cols.includes(col)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+// 建表（PostgreSQL 语法）
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS groups (
+      id SERIAL PRIMARY KEY,
+      code TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      center_lat DOUBLE PRECISION,
+      center_lng DOUBLE PRECISION,
+      radius INTEGER DEFAULT 0,
+      creator TEXT,
+      checkin_times TEXT DEFAULT '[]',
+      created_at BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS checkins (
+      id SERIAL PRIMARY KEY,
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      user_name TEXT NOT NULL,
+      lat DOUBLE PRECISION,
+      lng DOUBLE PRECISION,
+      address TEXT,
+      accuracy DOUBLE PRECISION,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_checkins_group ON checkins(group_id);
+    CREATE INDEX IF NOT EXISTS idx_checkins_time ON checkins(created_at);
+    CREATE TABLE IF NOT EXISTS admin_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+    CREATE TABLE IF NOT EXISTS admins (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      is_super BOOLEAN DEFAULT false,
+      created_at BIGINT NOT NULL
+    );
+  `);
+
+  // 初始化超级管理员
+  const envPassword = process.env.ADMIN_PASSWORD;
+  const superPwd = envPassword || 'admin123';
+  const superAdmin = await pool.query('SELECT id FROM admins WHERE is_super = true');
+  if (superAdmin.rows.length === 0) {
+    await pool.query(
+      'INSERT INTO admins (username, password, is_super, created_at) VALUES ($1, $2, true, $3)',
+      ['admin', superPwd, Date.now()]
+    );
   }
-}
-addColumnIfMissing('groups', 'center_lat', 'REAL');
-addColumnIfMissing('groups', 'center_lng', 'REAL');
-addColumnIfMissing('groups', 'radius', 'INTEGER DEFAULT 0');
-addColumnIfMissing('groups', 'creator', 'TEXT');
+  // 兼容旧密码配置
+  if (envPassword) {
+    await pool.query('UPDATE admins SET password = $1 WHERE is_super = true', [envPassword]);
+  }
 
-// 管理员设置表（存储密码等配置）
-db.exec(`
-  CREATE TABLE IF NOT EXISTS admin_settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-`);
-// 管理员账号表（支持多管理员）
-db.exec(`
-  CREATE TABLE IF NOT EXISTS admins (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    is_super INTEGER DEFAULT 0,
-    created_at INTEGER NOT NULL
-  );
-`);
-// 初始化超级管理员
-const envPassword = process.env.ADMIN_PASSWORD;
-const superPwd = envPassword || 'admin123';
-const superAdmin = db.prepare('SELECT id FROM admins WHERE is_super = 1').get();
-if (!superAdmin) {
-  db.prepare('INSERT INTO admins (username, password, is_super, created_at) VALUES (?, ?, 1, ?)')
-    .run('admin', superPwd, Date.now());
+  console.log('[数据库] PostgreSQL 连接成功，表结构已就绪');
 }
-// 兼容旧密码配置
-if (envPassword) {
-  db.prepare('UPDATE admins SET password = ? WHERE is_super = 1').run(envPassword);
-}
-function verifyAdmin(username, password) {
-  const row = db.prepare('SELECT * FROM admins WHERE username = ?').get(username);
+
+initDb().catch(err => {
+  console.error('[数据库] 初始化失败:', err.message);
+});
+
+async function verifyAdmin(username, password) {
+  const res = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
+  const row = res.rows[0];
   if (!row || row.password !== password) return null;
   return row;
 }
-
-// 为群组表添加打卡时间配置字段
-addColumnIfMissing('groups', 'checkin_times', 'TEXT');
 
 // ---------- 工具函数 ----------
 function genCode() {
@@ -130,7 +133,6 @@ function distance(lat1, lng1, lat2, lng2) {
 }
 
 // 反向地理编码
-// 优先级：高德地图(AMAP_KEY) > 天地图(TIANDITU_KEY) > BigDataCloud(免key)
 const AMAP_KEY = process.env.AMAP_KEY || '';
 const TIANDITU_KEY = process.env.TIANDITU_KEY || '';
 
@@ -190,67 +192,20 @@ function reverseGeocode(lat, lng) {
 }
 
 // ---------- 登录认证 ----------
-// token -> 管理员信息
 const validTokens = new Map();
 
-app.post('/api/admin/login', (req, res) => {
-  const { username, password } = req.body || {};
-  // 兼容旧版：只传密码时用 admin 账号
-  const uname = username || 'admin';
-  const admin = verifyAdmin(uname, password);
-  if (!admin) return res.status(401).json({ error: '用户名或密码错误' });
-  const token = crypto.randomBytes(32).toString('hex');
-  validTokens.set(token, { id: admin.id, username: admin.username, is_super: admin.is_super });
-  res.json({ token, username: admin.username, is_super: admin.is_super });
-});
-
-// 修改当前管理员密码
-app.put('/api/admin/password', auth, (req, res) => {
-  const { oldPassword, newPassword } = req.body || {};
-  if (!oldPassword || !newPassword) return res.status(400).json({ error: '请输入旧密码和新密码' });
-  if (newPassword.length < 6) return res.status(400).json({ error: '新密码至少 6 位' });
-  const admin = req.admin;
-  const row = db.prepare('SELECT password FROM admins WHERE id = ?').get(admin.id);
-  if (!row || row.password !== oldPassword) return res.status(401).json({ error: '旧密码错误' });
-  db.prepare('UPDATE admins SET password = ? WHERE id = ?').run(newPassword, admin.id);
-  // 清除当前 token
-  validTokens.delete(req.token);
-  res.json({ ok: true });
-});
-
-// 管理员列表（仅超级管理员）
-app.get('/api/admin/admins', auth, (req, res) => {
-  if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
-  const rows = db.prepare('SELECT id, username, is_super, created_at FROM admins ORDER BY is_super DESC, id').all();
-  res.json(rows);
-});
-
-// 添加管理员（仅超级管理员）
-app.post('/api/admin/admins', auth, (req, res) => {
-  if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
-  const { username, password } = req.body || {};
-  if (!username || !username.trim()) return res.status(400).json({ error: '用户名不能为空' });
-  if (!password || password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+app.post('/api/admin/login', async (req, res) => {
   try {
-    db.prepare('INSERT INTO admins (username, password, is_super, created_at) VALUES (?, ?, 0, ?)')
-      .run(username.trim(), password, Date.now());
-    res.json({ ok: true });
+    const { username, password } = req.body || {};
+    const uname = username || 'admin';
+    const admin = await verifyAdmin(uname, password);
+    if (!admin) return res.status(401).json({ error: '用户名或密码错误' });
+    const token = crypto.randomBytes(32).toString('hex');
+    validTokens.set(token, { id: admin.id, username: admin.username, is_super: admin.is_super });
+    res.json({ token, username: admin.username, is_super: admin.is_super });
   } catch (e) {
-    if (e.message.includes('UNIQUE')) return res.status(400).json({ error: '用户名已存在' });
-    res.status(500).json({ error: '创建失败' });
+    res.status(500).json({ error: e.message });
   }
-});
-
-// 删除管理员（仅超级管理员，不能删自己）
-app.delete('/api/admin/admins/:id', auth, (req, res) => {
-  if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
-  const id = parseInt(req.params.id);
-  if (id === req.admin.id) return res.status(400).json({ error: '不能删除自己' });
-  const target = db.prepare('SELECT is_super FROM admins WHERE id = ?').get(id);
-  if (!target) return res.status(404).json({ error: '管理员不存在' });
-  if (target.is_super) return res.status(400).json({ error: '不能删除超级管理员' });
-  db.prepare('DELETE FROM admins WHERE id = ?').run(id);
-  res.json({ ok: true });
 });
 
 function auth(req, res, next) {
@@ -263,257 +218,369 @@ function auth(req, res, next) {
   next();
 }
 
+// 修改当前管理员密码
+app.put('/api/admin/password', auth, async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body || {};
+    if (!oldPassword || !newPassword) return res.status(400).json({ error: '请输入旧密码和新密码' });
+    if (newPassword.length < 6) return res.status(400).json({ error: '新密码至少 6 位' });
+    const admin = req.admin;
+    const row = await pool.query('SELECT password FROM admins WHERE id = $1', [admin.id]);
+    if (row.rows.length === 0 || row.rows[0].password !== oldPassword) return res.status(401).json({ error: '旧密码错误' });
+    await pool.query('UPDATE admins SET password = $1 WHERE id = $2', [newPassword, admin.id]);
+    validTokens.delete(req.token);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 管理员列表（仅超级管理员）
+app.get('/api/admin/admins', auth, async (req, res) => {
+  try {
+    if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
+    const rows = await pool.query('SELECT id, username, is_super, created_at FROM admins ORDER BY is_super DESC, id');
+    res.json(rows.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 添加管理员（仅超级管理员）
+app.post('/api/admin/admins', auth, async (req, res) => {
+  try {
+    if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
+    const { username, password } = req.body || {};
+    if (!username || !username.trim()) return res.status(400).json({ error: '用户名不能为空' });
+    if (!password || password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+    await pool.query(
+      'INSERT INTO admins (username, password, is_super, created_at) VALUES ($1, $2, false, $3)',
+      [username.trim(), password, Date.now()]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    if (e.message.includes('duplicate key')) return res.status(400).json({ error: '用户名已存在' });
+    res.status(500).json({ error: '创建失败' });
+  }
+});
+
+// 删除管理员（仅超级管理员，不能删自己）
+app.delete('/api/admin/admins/:id', auth, async (req, res) => {
+  try {
+    if (!req.admin.is_super) return res.status(403).json({ error: '无权限' });
+    const id = parseInt(req.params.id);
+    if (id === req.admin.id) return res.status(400).json({ error: '不能删除自己' });
+    const target = await pool.query('SELECT is_super FROM admins WHERE id = $1', [id]);
+    if (target.rows.length === 0) return res.status(404).json({ error: '管理员不存在' });
+    if (target.rows[0].is_super) return res.status(400).json({ error: '不能删除超级管理员' });
+    await pool.query('DELETE FROM admins WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- 群组 API ----------
-app.post('/api/groups', (req, res) => {
-  const { name, userName } = req.body || {};
-  if (!name || !name.trim()) return res.status(400).json({ error: '请输入群组名称' });
-  let code, existing;
-  do { code = genCode(); existing = db.prepare('SELECT id FROM groups WHERE code = ?').get(code); } while (existing);
-  const creator = (userName || '').trim() || null;
-  const info = db.prepare(
-    'INSERT INTO groups (code, name, creator, created_at) VALUES (?, ?, ?, ?)'
-  ).run(code, name.trim(), creator, now());
-  res.json({ id: info.lastInsertRowid, code, name: name.trim(), creator, center_lat: null, center_lng: null, radius: 0 });
+app.post('/api/groups', async (req, res) => {
+  try {
+    const { name, userName } = req.body || {};
+    if (!name || !name.trim()) return res.status(400).json({ error: '请输入群组名称' });
+    let code, existing;
+    do {
+      code = genCode();
+      const r = await pool.query('SELECT id FROM groups WHERE code = $1', [code]);
+      existing = r.rows[0];
+    } while (existing);
+    const creator = (userName || '').trim() || null;
+    const info = await pool.query(
+      'INSERT INTO groups (code, name, creator, created_at) VALUES ($1, $2, $3, $4) RETURNING id',
+      [code, name.trim(), creator, now()]
+    );
+    res.json({ id: info.rows[0].id, code, name: name.trim(), creator, center_lat: null, center_lng: null, radius: 0 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.get('/api/groups/:code', (req, res) => {
-  const group = db.prepare('SELECT * FROM groups WHERE code = ?').get(req.params.code);
-  if (!group) return res.status(404).json({ error: '群组不存在' });
-  try { group.checkin_times = JSON.parse(group.checkin_times || '[]'); } catch { group.checkin_times = []; }
-  res.json(group);
+app.get('/api/groups/:code', async (req, res) => {
+  try {
+    const group = await pool.query('SELECT * FROM groups WHERE code = $1', [req.params.code]);
+    if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const g = group.rows[0];
+    try { g.checkin_times = JSON.parse(g.checkin_times || '[]'); } catch { g.checkin_times = []; }
+    res.json(g);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// 设置打卡范围（仅群组创建者或管理员可修改）
-app.patch('/api/groups/:code', (req, res) => {
-  const { center_lat, center_lng, radius, userName } = req.body || {};
-  const group = db.prepare('SELECT * FROM groups WHERE code = ?').get(req.params.code);
-  if (!group) return res.status(404).json({ error: '群组不存在' });
+// 设置打卡范围
+app.patch('/api/groups/:code', async (req, res) => {
+  try {
+    const { center_lat, center_lng, radius, userName } = req.body || {};
+    const group = await pool.query('SELECT * FROM groups WHERE code = $1', [req.params.code]);
+    if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const g = group.rows[0];
 
-  // 权限校验：只有群组创建者能修改（创建者为空时兼容旧群组，允许修改）
-  if (group.creator && group.creator !== (userName || '').trim()) {
-    // 检查是否为管理员
-    const token = req.headers['x-admin-token'];
-    if (!token || !validTokens.has(token)) {
-      return res.status(403).json({ error: '只有群主（创建者）才能修改打卡范围' });
+    if (g.creator && g.creator !== (userName || '').trim()) {
+      const token = req.headers['x-admin-token'];
+      if (!token || !validTokens.has(token)) {
+        return res.status(403).json({ error: '只有群主（创建者）才能修改打卡范围' });
+      }
     }
-  }
 
-  if (radius != null && (isNaN(radius) || radius < 0 || radius > 100000)) {
-    return res.status(400).json({ error: '半径需在 0-100000 米之间' });
-  }
-  if (center_lat != null && center_lng != null) {
-    if (isNaN(center_lat) || isNaN(center_lng) || center_lat < -90 || center_lat > 90 || center_lng < -180 || center_lng > 180) {
-      return res.status(400).json({ error: '经纬度不合法' });
+    if (radius != null && (isNaN(radius) || radius < 0 || radius > 100000)) {
+      return res.status(400).json({ error: '半径需在 0-100000 米之间' });
     }
+    if (center_lat != null && center_lng != null) {
+      if (isNaN(center_lat) || isNaN(center_lng) || center_lat < -90 || center_lat > 90 || center_lng < -180 || center_lng > 180) {
+        return res.status(400).json({ error: '经纬度不合法' });
+      }
+    }
+    await pool.query(
+      'UPDATE groups SET center_lat = $1, center_lng = $2, radius = $3 WHERE code = $4',
+      [center_lat ?? null, center_lng ?? null, radius ?? 0, req.params.code]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  db.prepare(
-    'UPDATE groups SET center_lat = ?, center_lng = ?, radius = ? WHERE code = ?'
-  ).run(center_lat ?? null, center_lng ?? null, radius ?? 0, req.params.code);
-  res.json({ ok: true });
 });
 
 // ---------- 打卡 API ----------
-app.post('/api/checkins', (req, res) => {
-  const { groupCode, userName, lat, lng, address, accuracy } = req.body || {};
-  if (!groupCode || !userName) return res.status(400).json({ error: '缺少参数' });
-  const group = db.prepare('SELECT * FROM groups WHERE code = ?').get(groupCode);
-  if (!group) return res.status(404).json({ error: '群组不存在' });
-
-  // 范围校验
-  if (group.radius > 0 && group.center_lat != null && group.center_lng != null && lat != null && lng != null) {
-    const dist = distance(lat, lng, group.center_lat, group.center_lng);
-    if (dist > group.radius) {
-      return res.status(403).json({
-        error: `超出打卡范围（当前距离中心 ${Math.round(dist)} 米，允许范围 ${group.radius} 米）`,
-        distance: Math.round(dist),
-        radius: group.radius
-      });
-    }
-  }
-
-  // 打卡时间校验
+app.post('/api/checkins', async (req, res) => {
   try {
-    const times = JSON.parse(group.checkin_times || '[]');
-    if (times.length > 0) {
-      const now = new Date();
-      const curMins = now.getHours() * 60 + now.getMinutes();
-      const inWindow = times.some(t => {
-        const [sh, sm] = (t.start || '00:00').split(':').map(Number);
-        const [eh, em] = (t.end || '23:59').split(':').map(Number);
-        const startMins = sh * 60 + sm;
-        const endMins = eh * 60 + em;
-        return curMins >= startMins && curMins <= endMins;
-      });
-      if (!inWindow) {
-        const windows = times.map(t => `${t.start}-${t.end}`).join('、');
-        return res.status(403).json({ error: `不在打卡时间内，允许打卡时段：${windows}` });
+    const { groupCode, userName, lat, lng, address, accuracy } = req.body || {};
+    if (!groupCode || !userName) return res.status(400).json({ error: '缺少参数' });
+    const group = await pool.query('SELECT * FROM groups WHERE code = $1', [groupCode]);
+    if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const g = group.rows[0];
+
+    // 范围校验
+    if (g.radius > 0 && g.center_lat != null && g.center_lng != null && lat != null && lng != null) {
+      const dist = distance(lat, lng, g.center_lat, g.center_lng);
+      if (dist > g.radius) {
+        return res.status(403).json({
+          error: `超出打卡范围（当前距离中心 ${Math.round(dist)} 米，允许范围 ${g.radius} 米）`,
+          distance: Math.round(dist),
+          radius: g.radius
+        });
       }
     }
-  } catch (e) {}
 
-  // 先用前端传来的地址，立即返回不阻塞
-  // 判断是否为经纬度格式（用户未手动填写地点）
-  const isCoord = /^\-?\d+\.\d+,\s*\-?\d+\.\d+$/.test(address || '');
-  const displayAddr = (address && !isCoord) ? address : `${lat?.toFixed(5)}, ${lng?.toFixed(5)}`;
-  const info = db.prepare(
-    `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(group.id, userName.trim(), lat ?? null, lng ?? null, displayAddr, accuracy ?? null, now());
-  const checkin = db.prepare('SELECT * FROM checkins WHERE id = ?').get(info.lastInsertRowid);
-  res.json(checkin);
-
-  // 后台异步获取详细地址并更新（仅当用户未手动填写地点时）
-  if (isCoord && lat != null && lng != null) {
-    reverseGeocode(lat, lng).then(addr => {
-      if (addr) {
-        db.prepare('UPDATE checkins SET address = ? WHERE id = ?').run(addr, info.lastInsertRowid);
+    // 打卡时间校验
+    try {
+      const times = JSON.parse(g.checkin_times || '[]');
+      if (times.length > 0) {
+        const now = new Date();
+        const curMins = now.getHours() * 60 + now.getMinutes();
+        const inWindow = times.some(t => {
+          const [sh, sm] = (t.start || '00:00').split(':').map(Number);
+          const [eh, em] = (t.end || '23:59').split(':').map(Number);
+          const startMins = sh * 60 + sm;
+          const endMins = eh * 60 + em;
+          return curMins >= startMins && curMins <= endMins;
+        });
+        if (!inWindow) {
+          const windows = times.map(t => `${t.start}-${t.end}`).join('、');
+          return res.status(403).json({ error: `不在打卡时间内，允许打卡时段：${windows}` });
+        }
       }
-    }).catch(() => {});
+    } catch (e) {}
+
+    const isCoord = /^\-?\d+\.\d+,\s*\-?\d+\.\d+$/.test(address || '');
+    const displayAddr = (address && !isCoord) ? address : `${lat?.toFixed(5)}, ${lng?.toFixed(5)}`;
+    const info = await pool.query(
+      `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [g.id, userName.trim(), lat ?? null, lng ?? null, displayAddr, accuracy ?? null, now()]
+    );
+    const checkin = await pool.query('SELECT * FROM checkins WHERE id = $1', [info.rows[0].id]);
+    res.json(checkin.rows[0]);
+
+    // 后台异步获取详细地址
+    if (isCoord && lat != null && lng != null) {
+      reverseGeocode(lat, lng).then(addr => {
+        if (addr) {
+          pool.query('UPDATE checkins SET address = $1 WHERE id = $2', [addr, info.rows[0].id]).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/api/groups/:code/checkins', (req, res) => {
-  const group = db.prepare('SELECT id FROM groups WHERE code = ?').get(req.params.code);
-  if (!group) return res.status(404).json({ error: '群组不存在' });
-  const rows = db.prepare('SELECT * FROM checkins WHERE group_id = ? ORDER BY created_at DESC').all(group.id);
-  res.json(rows);
+app.get('/api/groups/:code/checkins', async (req, res) => {
+  try {
+    const group = await pool.query('SELECT id FROM groups WHERE code = $1', [req.params.code]);
+    if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const rows = await pool.query('SELECT * FROM checkins WHERE group_id = $1 ORDER BY created_at DESC', [group.rows[0].id]);
+    res.json(rows.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ---------- 后台 API（需认证） ----------
-app.get('/api/admin/groups', auth, (req, res) => {
-  const groups = db.prepare(
-    `SELECT g.*, (SELECT COUNT(*) FROM checkins c WHERE c.group_id = g.id) AS checkin_count
-     FROM groups g ORDER BY g.created_at DESC`
-  ).all();
-  groups.forEach(g => {
-    try { g.checkin_times = JSON.parse(g.checkin_times || '[]'); } catch { g.checkin_times = []; }
-  });
-  res.json(groups);
+app.get('/api/admin/groups', auth, async (req, res) => {
+  try {
+    const groups = await pool.query(
+      `SELECT g.*, (SELECT COUNT(*) FROM checkins c WHERE c.group_id = g.id)::int AS checkin_count
+       FROM groups g ORDER BY g.created_at DESC`
+    );
+    groups.rows.forEach(g => {
+      try { g.checkin_times = JSON.parse(g.checkin_times || '[]'); } catch { g.checkin_times = []; }
+    });
+    res.json(groups.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // 成员打卡统计（按群组、按天，4次打卡=1天）
-app.get('/api/admin/stats/members', auth, (req, res) => {
-  const rows = db.prepare(
-    `SELECT c.user_name, g.name AS group_name, g.code AS group_code, c.created_at
-     FROM checkins c JOIN groups g ON c.group_id = g.id
-     ORDER BY c.created_at DESC`
-  ).all();
-  // 按 群组+用户+日期 分组，统计每天打卡次数
-  const dayKey = (ts) => new Date(ts).toLocaleDateString('zh-CN');
-  const map = new Map(); // key: group|user -> { name, group, days: Set, totalCheckins }
-  rows.forEach(r => {
-    const key = r.group_code + '|' + r.user_name;
-    if (!map.has(key)) {
-      map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), totalCheckins: 0, first: r.created_at, last: r.created_at });
-    }
-    const p = map.get(key);
-    const dk = dayKey(r.created_at);
-    p.days.set(dk, (p.days.get(dk) || 0) + 1);
-    p.totalCheckins++;
-    if (r.created_at < p.first) p.first = r.created_at;
-    if (r.created_at > p.last) p.last = r.created_at;
-  });
-  // 打卡天数：每天打卡 >= 4 次才算 1 天
-  const result = Array.from(map.values()).map(p => {
-    const fullDays = Array.from(p.days.values()).filter(c => c >= 4).length;
-    const checkinDays = p.days.size; // 实际打卡的天数
-    return {
-      user_name: p.user_name,
-      group_name: p.group_name,
-      group_code: p.group_code,
-      total_checkins: p.totalCheckins,
-      checkin_days: checkinDays,
-      full_days: fullDays, // 满4次的天数
-      first_checkin: p.first,
-      last_checkin: p.last,
-    };
-  });
-  res.json(result);
+app.get('/api/admin/stats/members', auth, async (req, res) => {
+  try {
+    const rows = await pool.query(
+      `SELECT c.user_name, g.name AS group_name, g.code AS group_code, c.created_at
+       FROM checkins c JOIN groups g ON c.group_id = g.id
+       ORDER BY c.created_at DESC`
+    );
+    const dayKey = (ts) => new Date(ts).toLocaleDateString('zh-CN');
+    const map = new Map();
+    rows.rows.forEach(r => {
+      const key = r.group_code + '|' + r.user_name;
+      if (!map.has(key)) {
+        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), totalCheckins: 0, first: r.created_at, last: r.created_at });
+      }
+      const p = map.get(key);
+      const dk = dayKey(r.created_at);
+      p.days.set(dk, (p.days.get(dk) || 0) + 1);
+      p.totalCheckins++;
+      if (r.created_at < p.first) p.first = r.created_at;
+      if (r.created_at > p.last) p.last = r.created_at;
+    });
+    const result = Array.from(map.values()).map(p => {
+      const fullDays = Array.from(p.days.values()).filter(c => c >= 4).length;
+      const checkinDays = p.days.size;
+      return {
+        user_name: p.user_name,
+        group_name: p.group_name,
+        group_code: p.group_code,
+        total_checkins: p.totalCheckins,
+        checkin_days: checkinDays,
+        full_days: fullDays,
+        first_checkin: p.first,
+        last_checkin: p.last,
+      };
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.get('/api/admin/checkins', auth, (req, res) => {
-  const rows = db.prepare(
-    `SELECT c.*, g.code AS group_code, g.name AS group_name
-     FROM checkins c JOIN groups g ON c.group_id = g.id
-     ORDER BY c.created_at DESC LIMIT 500`
-  ).all();
-  res.json(rows);
+app.get('/api/admin/checkins', auth, async (req, res) => {
+  try {
+    const rows = await pool.query(
+      `SELECT c.*, g.code AS group_code, g.name AS group_name
+       FROM checkins c JOIN groups g ON c.group_id = g.id
+       ORDER BY c.created_at DESC LIMIT 500`
+    );
+    res.json(rows.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.delete('/api/admin/checkins/:id', auth, (req, res) => {
-  db.prepare('DELETE FROM checkins WHERE id = ?').run(req.params.id);
-  res.json({ ok: true });
+app.delete('/api/admin/checkins/:id', auth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM checkins WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // 编辑打卡记录（用户名、地址）
-app.put('/api/admin/checkins/:id', auth, (req, res) => {
-  const { user_name, address } = req.body;
-  const fields = [];
-  const values = [];
-  if (user_name !== undefined) { fields.push('user_name = ?'); values.push(user_name); }
-  if (address !== undefined) { fields.push('address = ?'); values.push(address); }
-  if (!fields.length) return res.status(400).json({ error: '没有可更新的字段' });
-  values.push(req.params.id);
-  db.prepare(`UPDATE checkins SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-  res.json({ ok: true });
+app.put('/api/admin/checkins/:id', auth, async (req, res) => {
+  try {
+    const { user_name, address } = req.body;
+    const fields = [];
+    const values = [];
+    let idx = 1;
+    if (user_name !== undefined) { fields.push(`user_name = $${idx++}`); values.push(user_name); }
+    if (address !== undefined) { fields.push(`address = $${idx++}`); values.push(address); }
+    if (!fields.length) return res.status(400).json({ error: '没有可更新的字段' });
+    values.push(req.params.id);
+    await pool.query(`UPDATE checkins SET ${fields.join(', ')} WHERE id = $${idx}`, values);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // 编辑群组信息（名称、中心点、范围、打卡时间）
-app.put('/api/admin/groups/:id', auth, (req, res) => {
-  const { name, center_lat, center_lng, radius, creator, checkin_times } = req.body;
-  const fields = [];
-  const values = [];
-  if (name !== undefined) { fields.push('name = ?'); values.push(name); }
-  if (center_lat !== undefined) { fields.push('center_lat = ?'); values.push(center_lat); }
-  if (center_lng !== undefined) { fields.push('center_lng = ?'); values.push(center_lng); }
-  if (radius !== undefined) { fields.push('radius = ?'); values.push(radius); }
-  if (creator !== undefined) { fields.push('creator = ?'); values.push(creator); }
-  if (checkin_times !== undefined) { fields.push('checkin_times = ?'); values.push(JSON.stringify(checkin_times || [])); }
-  if (!fields.length) return res.status(400).json({ error: '没有可更新的字段' });
-  values.push(req.params.id);
-  db.prepare(`UPDATE groups SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-  res.json({ ok: true });
+app.put('/api/admin/groups/:id', auth, async (req, res) => {
+  try {
+    const { name, center_lat, center_lng, radius, creator, checkin_times } = req.body;
+    const fields = [];
+    const values = [];
+    let idx = 1;
+    if (name !== undefined) { fields.push(`name = $${idx++}`); values.push(name); }
+    if (center_lat !== undefined) { fields.push(`center_lat = $${idx++}`); values.push(center_lat); }
+    if (center_lng !== undefined) { fields.push(`center_lng = $${idx++}`); values.push(center_lng); }
+    if (radius !== undefined) { fields.push(`radius = $${idx++}`); values.push(radius); }
+    if (creator !== undefined) { fields.push(`creator = $${idx++}`); values.push(creator); }
+    if (checkin_times !== undefined) { fields.push(`checkin_times = $${idx++}`); values.push(JSON.stringify(checkin_times || [])); }
+    if (!fields.length) return res.status(400).json({ error: '没有可更新的字段' });
+    values.push(req.params.id);
+    await pool.query(`UPDATE groups SET ${fields.join(', ')} WHERE id = $${idx}`, values);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// 导出 CSV（Excel 可直接打开）
-app.get('/api/admin/export', auth, (req, res) => {
-  const rows = db.prepare(
-    `SELECT c.created_at, c.user_name, g.name AS group_name, g.code AS group_code,
-            c.lat, c.lng, c.address, c.accuracy
-     FROM checkins c JOIN groups g ON c.group_id = g.id
-     ORDER BY c.created_at DESC`
-  ).all();
+// 导出 CSV
+app.get('/api/admin/export', auth, async (req, res) => {
+  try {
+    const rows = await pool.query(
+      `SELECT c.created_at, c.user_name, g.name AS group_name, g.code AS group_code,
+              c.lat, c.lng, c.address, c.accuracy
+       FROM checkins c JOIN groups g ON c.group_id = g.id
+       ORDER BY c.created_at DESC`
+    );
 
-  const headers = ['时间', '用户', '群组', '邀请码', '纬度', '经度', '地址', '精度(米)'];
-  const escapeCsv = v => {
-    const s = v == null ? '' : String(v);
-    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-  };
-  const lines = [headers.join(',')];
-  for (const r of rows) {
-    lines.push([
-      new Date(r.created_at).toLocaleString('zh-CN'),
-      r.user_name, r.group_name, r.group_code,
-      r.lat ?? '', r.lng ?? '', r.address ?? '', r.accuracy ?? ''
-    ].map(escapeCsv).join(','));
+    const headers = ['时间', '用户', '群组', '邀请码', '纬度', '经度', '地址', '精度(米)'];
+    const escapeCsv = v => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const lines = [headers.join(',')];
+    for (const r of rows.rows) {
+      lines.push([
+        new Date(r.created_at).toLocaleString('zh-CN'),
+        r.user_name, r.group_name, r.group_code,
+        r.lat ?? '', r.lng ?? '', r.address ?? '', r.accuracy ?? ''
+      ].map(escapeCsv).join(','));
+    }
+    const csv = '\uFEFF' + lines.join('\n');
+    const filename = `打卡记录_${new Date().toISOString().slice(0, 10)}.csv`;
+    const encodedName = encodeURIComponent(filename);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="checkin.csv"; filename*=UTF-8''${encodedName}`);
+    res.send(csv);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  // 加 BOM 让 Excel 正确识别 UTF-8 中文
-  const csv = '\uFEFF' + lines.join('\n');
-  const filename = `打卡记录_${new Date().toISOString().slice(0, 10)}.csv`;
-  // HTTP 头不允许非 ASCII，用 RFC 5987 编码中文文件名
-  const encodedName = encodeURIComponent(filename);
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="checkin.csv"; filename*=UTF-8''${encodedName}`);
-  res.send(csv);
 });
 
 // ---------- 启动 ----------
-// HTTP 服务器（localhost 可用；手机需用 HTTPS）
 http.createServer(app).listen(PORT, '0.0.0.0', () => {
   console.log(`[HTTP]  打卡应用: http://localhost:${PORT}`);
 });
 
-// HTTPS 服务器（手机定位 + 安装到桌面必须用 HTTPS）
 const certPath = path.join(__dirname, 'certs', 'cert.pem');
 const keyPath = path.join(__dirname, 'certs', 'key.pem');
 if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
