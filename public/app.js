@@ -472,7 +472,8 @@ async function reverseGeocode(lat, lng) {
 async function loadRecords() {
   if (!state.groupCode) return;
   try {
-    const res = await fetch('/api/groups/' + encodeURIComponent(state.groupCode) + '/checkins');
+    // 只获取当前用户自己的打卡记录（隐私保护）
+    const res = await fetch('/api/groups/' + encodeURIComponent(state.groupCode) + '/checkins?user_name=' + encodeURIComponent(state.userName));
     const rows = await res.json();
     if (!res.ok) throw new Error(rows.error);
     renderRecords(rows);

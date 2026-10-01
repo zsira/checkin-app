@@ -526,7 +526,20 @@ app.get('/api/groups/:code/checkins', async (req, res) => {
   try {
     const group = await pool.query('SELECT id FROM groups WHERE code = $1', [req.params.code]);
     if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
-    const rows = await pool.query('SELECT * FROM checkins WHERE group_id = $1 ORDER BY created_at DESC', [group.rows[0].id]);
+    const userName = (req.query.user_name || '').trim();
+    let rows;
+    if (userName) {
+      // 只返回该用户自己的打卡记录（隐私保护）
+      rows = await pool.query(
+        'SELECT * FROM checkins WHERE group_id = $1 AND user_name = $2 ORDER BY created_at DESC',
+        [group.rows[0].id, userName]
+      );
+    } else {
+      rows = await pool.query(
+        'SELECT * FROM checkins WHERE group_id = $1 ORDER BY created_at DESC',
+        [group.rows[0].id]
+      );
+    }
     res.json(rows.rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -691,28 +704,64 @@ app.put('/api/admin/groups/:id', auth, async (req, res) => {
 // 导出 CSV
 app.get('/api/admin/export', auth, async (req, res) => {
   try {
+    // 按人员汇总统计（复用成员统计逻辑）
     const rows = await pool.query(
-      `SELECT c.created_at, c.user_name, g.name AS group_name, g.code AS group_code,
-              c.lat, c.lng, c.address, c.accuracy
+      `SELECT c.user_name, g.name AS group_name, g.code AS group_code, c.created_at
        FROM checkins c JOIN groups g ON c.group_id = g.id
        ORDER BY c.created_at DESC`
     );
+    const dayKey = (ts) => new Date(Number(ts)).toLocaleDateString('zh-CN');
+    const map = new Map();
+    rows.rows.forEach(r => {
+      const key = r.group_code + '|' + r.user_name;
+      if (!map.has(key)) {
+        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Set(), totalCheckins: 0, first: r.created_at, last: r.created_at });
+      }
+      const p = map.get(key);
+      p.days.add(dayKey(r.created_at));
+      p.totalCheckins++;
+      if (r.created_at < p.first) p.first = r.created_at;
+      if (r.created_at > p.last) p.last = r.created_at;
+    });
+    const stats = Array.from(map.values()).map(p => {
+      const checkinDays = p.days.size;
+      const first = new Date(Number(p.first));
+      const last = new Date(Number(p.last));
+      first.setHours(0, 0, 0, 0);
+      last.setHours(0, 0, 0, 0);
+      const totalDays = Math.floor((last - first) / 86400000) + 1;
+      const absentDays = Math.max(0, totalDays - checkinDays);
+      return {
+        user_name: p.user_name,
+        group_name: p.group_name,
+        checkin_days: checkinDays,
+        absent_days: absentDays,
+        total_checkins: p.totalCheckins,
+      };
+    });
 
-    const headers = ['时间', '用户', '群组', '邀请码', '纬度', '经度', '地址', '精度(米)'];
+    // 汇总总计
+    const totalCheckins = stats.reduce((s, p) => s + p.total_checkins, 0);
+    const totalAbsent = stats.reduce((s, p) => s + p.absent_days, 0);
+
     const escapeCsv = v => {
       const s = v == null ? '' : String(v);
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
+    const headers = ['人员', '所属群组', '打卡天数', '缺卡天数', '打卡总数', '缺卡总数'];
     const lines = [headers.join(',')];
-    for (const r of rows.rows) {
+    for (const p of stats) {
       lines.push([
-        new Date(Number(r.created_at)).toLocaleString('zh-CN'),
-        r.user_name, r.group_name, r.group_code,
-        r.lat ?? '', r.lng ?? '', r.address ?? '', r.accuracy ?? ''
+        p.user_name, p.group_name,
+        p.checkin_days, p.absent_days,
+        p.total_checkins, p.absent_days
       ].map(escapeCsv).join(','));
     }
+    // 合计行
+    lines.push(['合计', '', stats.reduce((s,p)=>s+p.checkin_days,0), totalAbsent, totalCheckins, totalAbsent].map(escapeCsv).join(','));
+
     const csv = '\uFEFF' + lines.join('\n');
-    const filename = `打卡记录_${new Date().toISOString().slice(0, 10)}.csv`;
+    const filename = `打卡统计_${new Date().toISOString().slice(0, 10)}.csv`;
     const encodedName = encodeURIComponent(filename);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="checkin.csv"; filename*=UTF-8''${encodedName}`);
