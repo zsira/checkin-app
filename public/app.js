@@ -177,9 +177,19 @@ function bindEvents() {
   $('btn-join-group').onclick = joinGroup;
 
   $('btn-checkin').onclick = doCheckin;
-  $('btn-refresh').onclick = loadRecords;
+  $('btn-refresh').onclick = () => { loadRecords(); loadLeaves(); };
   $('btn-leave').onclick = leaveGroup;
   $('btn-install').onclick = installApp;
+
+  // 请假
+  $('btn-ask-leave').onclick = openLeaveModal;
+  $('btn-close-leave').onclick = () => $('leave-modal').classList.add('hidden');
+  $('btn-submit-leave').onclick = submitLeave;
+  $('leave-mode').onchange = () => {
+    const mode = $('leave-mode').value;
+    $('leave-days-box').style.display = mode === 'days' ? '' : 'none';
+    $('leave-range-box').style.display = mode === 'range' ? '' : 'none';
+  };
 
   // 打卡范围
   $('btn-set-range').onclick = openRangeModal;
@@ -238,6 +248,7 @@ function enterGroup(code, name) {
   $('group-code-label').textContent = code;
   showView('main');
   loadRecords();
+  loadLeaves();
   loadGroupSettings();
 }
 
@@ -472,7 +483,7 @@ async function reverseGeocode(lat, lng) {
 async function loadRecords() {
   if (!state.groupCode) return;
   try {
-    // 只获取当前用户自己的打卡记录（隐私保护）
+    // 仅获取当前用户自己的打卡记录
     const res = await fetch('/api/groups/' + encodeURIComponent(state.groupCode) + '/checkins?user_name=' + encodeURIComponent(state.userName));
     const rows = await res.json();
     if (!res.ok) throw new Error(rows.error);
@@ -510,6 +521,73 @@ function escapeHtml(s) {
   const div = document.createElement('div');
   div.textContent = s;
   return div.innerHTML;
+}
+
+// ---------- 请假 ----------
+function fmtLeaveTs(ts) {
+  const d = new Date(Number(ts));
+  return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function openLeaveModal() {
+  $('leave-mode').value = 'days';
+  $('leave-days').value = '1';
+  $('leave-reason').value = '';
+  $('leave-start').value = '';
+  $('leave-end').value = '';
+  $('leave-days-box').style.display = '';
+  $('leave-range-box').style.display = 'none';
+  $('leave-modal').classList.remove('hidden');
+}
+
+async function submitLeave() {
+  let startTs, endTs;
+  const mode = $('leave-mode').value;
+  const reason = $('leave-reason').value.trim();
+  if (mode === 'days') {
+    const days = parseFloat($('leave-days').value);
+    if (!days || days <= 0) { alert('请输入有效的请假天数'); return; }
+    startTs = Date.now();
+    endTs = startTs + days * 86400000;
+  } else {
+    const s = $('leave-start').value, e = $('leave-end').value;
+    if (!s || !e) { alert('请选择开始和结束时间'); return; }
+    startTs = new Date(s).getTime();
+    endTs = new Date(e).getTime();
+    if (endTs <= startTs) { alert('结束时间必须晚于开始时间'); return; }
+  }
+  try {
+    const res = await fetch('/api/leaves', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupCode: state.groupCode, userName: state.userName, start_ts: startTs, end_ts: endTs, reason }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    $('leave-modal').classList.add('hidden');
+    toast('请假申请已提交 📝');
+    loadLeaves();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function loadLeaves() {
+  const box = $('leave-status');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/leaves?groupCode=' + encodeURIComponent(state.groupCode) + '&userName=' + encodeURIComponent(state.userName));
+    const rows = await res.json();
+    if (!res.ok) return;
+    const now = Date.now();
+    const active = rows.filter(r => Number(r.end_ts) > now);
+    if (!active.length) { box.innerHTML = ''; return; }
+    box.innerHTML = active.map(r => {
+      const days = Math.ceil((Number(r.end_ts) - Number(r.start_ts)) / 86400000);
+      return `<div style="background:#fff3e0;border:1px solid #ffe0b2;border-radius:8px;padding:8px 10px;margin-bottom:6px;color:#e65100">
+        📝 请假中：${fmtLeaveTs(r.start_ts)} ~ ${fmtLeaveTs(r.end_ts)}（${days}天）${r.reason ? ' · ' + escapeHtml(r.reason) : ''}
+      </div>`;
+    }).join('');
+  } catch (e) {}
 }
 
 // ---------- 打卡范围 ----------

@@ -93,6 +93,16 @@ async function initDb() {
       is_super BOOLEAN DEFAULT false,
       created_at BIGINT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS leaves (
+      id SERIAL PRIMARY KEY,
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      user_name TEXT NOT NULL,
+      start_ts BIGINT NOT NULL,
+      end_ts BIGINT NOT NULL,
+      reason TEXT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_leaves_group_user ON leaves(group_id, user_name);
   `);
 
   // 兼容性：添加休息字段（如已存在则跳过）
@@ -136,6 +146,25 @@ function genCode() {
   return code;
 }
 function now() { return Date.now(); }
+
+// 日期 key（本地时区，按天）
+function dayKey(ts) {
+  const d = new Date(Number(ts));
+  return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+}
+
+// 根据请假记录生成请假日期集合（Set of dayKey）
+function buildLeaveDateSet(leaveRows) {
+  const set = new Set();
+  for (const l of leaveRows) {
+    const start = new Date(Number(l.start_ts)); start.setHours(0, 0, 0, 0);
+    const end = new Date(Number(l.end_ts)); end.setHours(0, 0, 0, 0);
+    for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
+      set.add(dayKey(t));
+    }
+  }
+  return set;
+}
 
 // Haversine 距离（米）
 function distance(lat1, lng1, lat2, lng2) {
@@ -526,21 +555,72 @@ app.get('/api/groups/:code/checkins', async (req, res) => {
   try {
     const group = await pool.query('SELECT id FROM groups WHERE code = $1', [req.params.code]);
     if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const gid = group.rows[0].id;
     const userName = (req.query.user_name || '').trim();
     let rows;
     if (userName) {
-      // 只返回该用户自己的打卡记录（隐私保护）
+      // 仅返回该用户自己的打卡记录
       rows = await pool.query(
         'SELECT * FROM checkins WHERE group_id = $1 AND user_name = $2 ORDER BY created_at DESC',
-        [group.rows[0].id, userName]
+        [gid, userName]
       );
     } else {
-      rows = await pool.query(
-        'SELECT * FROM checkins WHERE group_id = $1 ORDER BY created_at DESC',
-        [group.rows[0].id]
-      );
+      rows = await pool.query('SELECT * FROM checkins WHERE group_id = $1 ORDER BY created_at DESC', [gid]);
     }
     res.json(rows.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- 请假 API ----------
+// 提交请假
+app.post('/api/leaves', async (req, res) => {
+  try {
+    const { groupCode, userName, start_ts, end_ts, reason } = req.body || {};
+    if (!groupCode || !userName || !start_ts || !end_ts) {
+      return res.status(400).json({ error: '缺少参数' });
+    }
+    const start = Number(start_ts), end = Number(end_ts);
+    if (end <= start) return res.status(400).json({ error: '结束时间必须晚于开始时间' });
+    const group = await pool.query('SELECT id FROM groups WHERE code = $1', [groupCode]);
+    if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const info = await pool.query(
+      `INSERT INTO leaves (group_id, user_name, start_ts, end_ts, reason, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [group.rows[0].id, userName.trim(), start, end, (reason || '').trim() || null, now()]
+    );
+    res.json(info.rows[0]);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 查询自己的请假记录
+app.get('/api/leaves', async (req, res) => {
+  try {
+    const { groupCode, userName } = req.query;
+    if (!groupCode || !userName) return res.status(400).json({ error: '缺少参数' });
+    const group = await pool.query('SELECT id FROM groups WHERE code = $1', [groupCode]);
+    if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const rows = await pool.query(
+      'SELECT * FROM leaves WHERE group_id = $1 AND user_name = $2 ORDER BY start_ts DESC',
+      [group.rows[0].id, userName.trim()]
+    );
+    res.json(rows.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 删除自己的请假（取消请假）
+app.delete('/api/leaves/:id', async (req, res) => {
+  try {
+    const { userName } = req.query;
+    const id = parseInt(req.params.id);
+    if (!userName) return res.status(400).json({ error: '缺少参数' });
+    await pool.query('DELETE FROM leaves WHERE id = $1 AND user_name = $2', [id, userName.trim()]);
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -562,15 +642,27 @@ app.get('/api/admin/groups', auth, async (req, res) => {
   }
 });
 
-// 成员打卡统计（按群组、按天，4次打卡=1天）
+// 成员打卡统计（按群组、按天；请假日期不计缺卡）
 app.get('/api/admin/stats/members', auth, async (req, res) => {
   try {
     const rows = await pool.query(
-      `SELECT c.user_name, g.name AS group_name, g.code AS group_code, c.created_at
+      `SELECT c.user_name, g.name AS group_name, g.code AS group_code, g.id AS group_id, c.created_at
        FROM checkins c JOIN groups g ON c.group_id = g.id
        ORDER BY c.created_at DESC`
     );
-    const dayKey = (ts) => new Date(Number(ts)).toLocaleDateString('zh-CN');
+    // 所有请假记录
+    const leaveRows = await pool.query(
+      `SELECT l.user_name, l.start_ts, l.end_ts, g.code AS group_code
+       FROM leaves l JOIN groups g ON l.group_id = g.id`
+    );
+    const leaveMap = new Map(); // key -> Set<dayKey>
+    leaveRows.rows.forEach(l => {
+      const key = l.group_code + '|' + l.user_name;
+      if (!leaveMap.has(key)) leaveMap.set(key, new Set());
+      buildLeaveDateSet([l]).forEach(d => leaveMap.get(key).add(d));
+    });
+
+    const dk = (ts) => dayKey(ts);
     const map = new Map();
     rows.rows.forEach(r => {
       const key = r.group_code + '|' + r.user_name;
@@ -578,8 +670,8 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
         map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), totalCheckins: 0, first: r.created_at, last: r.created_at });
       }
       const p = map.get(key);
-      const dk = dayKey(r.created_at);
-      p.days.set(dk, (p.days.get(dk) || 0) + 1);
+      const d = dk(r.created_at);
+      p.days.set(d, (p.days.get(d) || 0) + 1);
       p.totalCheckins++;
       if (r.created_at < p.first) p.first = r.created_at;
       if (r.created_at > p.last) p.last = r.created_at;
@@ -587,13 +679,20 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
     const result = Array.from(map.values()).map(p => {
       const fullDays = Array.from(p.days.values()).filter(c => c >= 4).length;
       const checkinDays = p.days.size;
-      // 计算缺卡天数：首次到末次打卡之间的总天数 - 已打卡天数
-      const first = new Date(Number(p.first));
-      const last = new Date(Number(p.last));
-      first.setHours(0, 0, 0, 0);
-      last.setHours(0, 0, 0, 0);
-      const totalDays = Math.floor((last - first) / 86400000) + 1;
-      const absentDays = Math.max(0, totalDays - checkinDays);
+      const key = p.group_code + '|' + p.user_name;
+      const leaveDates = leaveMap.get(key) || new Set();
+      // 计算缺卡天数：首次到末次打卡之间，未打卡且未请假的天数
+      const first = new Date(Number(p.first)); first.setHours(0, 0, 0, 0);
+      const last = new Date(Number(p.last)); last.setHours(0, 0, 0, 0);
+      let absentDays = 0, leaveDaysInRange = 0;
+      for (let t = first.getTime(); t <= last.getTime(); t += 86400000) {
+        const k = dk(t);
+        if (p.days.has(k)) continue;           // 已打卡
+        if (leaveDates.has(k)) { leaveDaysInRange++; continue; } // 请假，不计缺卡
+        absentDays++;
+      }
+      // 请假总天数（含统计区间外）
+      const totalLeaveDays = leaveDates.size;
       return {
         user_name: p.user_name,
         group_name: p.group_name,
@@ -602,11 +701,40 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
         checkin_days: checkinDays,
         full_days: fullDays,
         absent_days: absentDays,
+        leave_days: totalLeaveDays,
         first_checkin: p.first,
         last_checkin: p.last,
       };
     });
     res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 管理员查看所有请假记录（含当前请假中的标记）
+app.get('/api/admin/leaves', auth, async (req, res) => {
+  try {
+    const rows = await pool.query(
+      `SELECT l.*, g.name AS group_name, g.code AS group_code
+       FROM leaves l JOIN groups g ON l.group_id = g.id
+       ORDER BY l.created_at DESC`
+    );
+    const nowTs = now();
+    res.json(rows.rows.map(r => ({
+      ...r,
+      active: Number(r.end_ts) > nowTs,
+    })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 管理员删除请假记录
+app.delete('/api/admin/leaves/:id', auth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM leaves WHERE id = $1', [parseInt(req.params.id)]);
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -701,64 +829,74 @@ app.put('/api/admin/groups/:id', auth, async (req, res) => {
   }
 });
 
-// 导出 CSV
+// 导出 CSV（按人员汇总：人员、群组、打卡天数、缺卡天数、请假天数、打卡总数、缺卡总数）
 app.get('/api/admin/export', auth, async (req, res) => {
   try {
-    // 按人员汇总统计（复用成员统计逻辑）
     const rows = await pool.query(
-      `SELECT c.user_name, g.name AS group_name, g.code AS group_code, c.created_at
+      `SELECT c.created_at, c.user_name, g.name AS group_name, g.code AS group_code
        FROM checkins c JOIN groups g ON c.group_id = g.id
        ORDER BY c.created_at DESC`
     );
-    const dayKey = (ts) => new Date(Number(ts)).toLocaleDateString('zh-CN');
+    const leaveRows = await pool.query(
+      `SELECT l.user_name, l.start_ts, l.end_ts, g.code AS group_code
+       FROM leaves l JOIN groups g ON l.group_id = g.id`
+    );
+    const leaveMap = new Map();
+    leaveRows.rows.forEach(l => {
+      const key = l.group_code + '|' + l.user_name;
+      if (!leaveMap.has(key)) leaveMap.set(key, new Set());
+      buildLeaveDateSet([l]).forEach(d => leaveMap.get(key).add(d));
+    });
+
+    const dk = (ts) => dayKey(ts);
     const map = new Map();
     rows.rows.forEach(r => {
       const key = r.group_code + '|' + r.user_name;
       if (!map.has(key)) {
-        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Set(), totalCheckins: 0, first: r.created_at, last: r.created_at });
+        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Set(), total: 0, first: r.created_at, last: r.created_at });
       }
       const p = map.get(key);
-      p.days.add(dayKey(r.created_at));
-      p.totalCheckins++;
+      p.days.add(dk(r.created_at));
+      p.total++;
       if (r.created_at < p.first) p.first = r.created_at;
       if (r.created_at > p.last) p.last = r.created_at;
     });
+
     const stats = Array.from(map.values()).map(p => {
-      const checkinDays = p.days.size;
-      const first = new Date(Number(p.first));
-      const last = new Date(Number(p.last));
-      first.setHours(0, 0, 0, 0);
-      last.setHours(0, 0, 0, 0);
-      const totalDays = Math.floor((last - first) / 86400000) + 1;
-      const absentDays = Math.max(0, totalDays - checkinDays);
+      const leaveDates = leaveMap.get(p.group_code + '|' + p.user_name) || new Set();
+      const first = new Date(Number(p.first)); first.setHours(0, 0, 0, 0);
+      const last = new Date(Number(p.last)); last.setHours(0, 0, 0, 0);
+      let absentDays = 0;
+      for (let t = first.getTime(); t <= last.getTime(); t += 86400000) {
+        const k = dk(t);
+        if (p.days.has(k) || leaveDates.has(k)) continue;
+        absentDays++;
+      }
       return {
-        user_name: p.user_name,
-        group_name: p.group_name,
-        checkin_days: checkinDays,
-        absent_days: absentDays,
-        total_checkins: p.totalCheckins,
+        user_name: p.user_name, group_name: p.group_name,
+        checkin_days: p.days.size, absent_days: absentDays,
+        leave_days: leaveDates.size, total_checkins: p.total,
       };
     });
-
-    // 汇总总计
-    const totalCheckins = stats.reduce((s, p) => s + p.total_checkins, 0);
-    const totalAbsent = stats.reduce((s, p) => s + p.absent_days, 0);
 
     const escapeCsv = v => {
       const s = v == null ? '' : String(v);
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
-    const headers = ['人员', '所属群组', '打卡天数', '缺卡天数', '打卡总数', '缺卡总数'];
+    const headers = ['人员', '所属群组', '打卡天数', '缺卡天数', '请假天数', '打卡总数', '缺卡总数'];
     const lines = [headers.join(',')];
     for (const p of stats) {
       lines.push([
         p.user_name, p.group_name,
-        p.checkin_days, p.absent_days,
+        p.checkin_days, p.absent_days, p.leave_days,
         p.total_checkins, p.absent_days
       ].map(escapeCsv).join(','));
     }
-    // 合计行
-    lines.push(['合计', '', stats.reduce((s,p)=>s+p.checkin_days,0), totalAbsent, totalCheckins, totalAbsent].map(escapeCsv).join(','));
+    const sumCheckinDays = stats.reduce((s, p) => s + p.checkin_days, 0);
+    const sumAbsent = stats.reduce((s, p) => s + p.absent_days, 0);
+    const sumLeave = stats.reduce((s, p) => s + p.leave_days, 0);
+    const sumTotal = stats.reduce((s, p) => s + p.total_checkins, 0);
+    lines.push(['合计', '', sumCheckinDays, sumAbsent, sumLeave, sumTotal, sumAbsent].map(escapeCsv).join(','));
 
     const csv = '\uFEFF' + lines.join('\n');
     const filename = `打卡统计_${new Date().toISOString().slice(0, 10)}.csv`;

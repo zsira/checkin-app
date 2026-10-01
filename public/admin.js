@@ -7,6 +7,7 @@ function authHeaders() { return { 'Authorization': 'Bearer ' + getToken() }; }
 let allCheckins = [];
 let allGroups = [];
 let memberStats = [];
+let allLeaves = [];
 let currentAdmin = null; // { username, is_super }
 let refreshTimer = null;
 let editing = null; // { type: 'group'|'checkin', id, data }
@@ -115,18 +116,21 @@ function logout() {
 // ---------- 数据加载 ----------
 async function loadAll() {
   try {
-    const [gRes, cRes, sRes, meRes] = await Promise.all([
+    const [gRes, cRes, sRes, meRes, lRes] = await Promise.all([
       fetch('/api/admin/groups', { headers: authHeaders() }),
       fetch('/api/admin/checkins', { headers: authHeaders() }),
       fetch('/api/admin/stats/members', { headers: authHeaders() }),
       fetch('/api/admin/me', { headers: authHeaders() }),
+      fetch('/api/admin/leaves', { headers: authHeaders() }),
     ]);
     if (gRes.status === 401 || cRes.status === 401 || meRes.status === 401) { logout(); return false; }
     allGroups = await gRes.json();
     allCheckins = await cRes.json();
     memberStats = sRes.ok ? await sRes.json() : [];
+    allLeaves = lRes.ok ? await lRes.json() : [];
     if (meRes.ok) currentAdmin = await meRes.json();
     renderStats();
+    renderLeaves();
     renderGroups();
     renderPersons();
     // 超管功能
@@ -156,6 +160,38 @@ function renderStats() {
     { num: uniqueUsers, label: '参与人数' },
     { num: todayCount, label: '今日打卡' },
   ].map(s => `<div class="stat-card"><div class="stat-num">${s.num}</div><div class="stat-label">${s.label}</div></div>`).join('');
+}
+
+function renderLeaves() {
+  const box = $('leaves-list');
+  if (!box) return;
+  const active = allLeaves.filter(l => l.active);
+  // 顶部请假中提示计数
+  const badge = $('leave-badge');
+  if (badge) badge.textContent = active.length;
+  if (!allLeaves.length) { box.innerHTML = '<div style="color:var(--muted);text-align:center;padding:16px">暂无请假记录</div>'; return; }
+  box.innerHTML = allLeaves.slice(0, 50).map(l => {
+    const days = Math.ceil((Number(l.end_ts) - Number(l.start_ts)) / 86400000);
+    const tag = l.active
+      ? '<span style="background:#fff3e0;color:#e65100;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:6px">请假中</span>'
+      : '<span style="background:#f0f0f0;color:#999;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:6px">已结束</span>';
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f0f0f0;flex-wrap:wrap;gap:8px">
+        <div>
+          <b>${esc(l.user_name)}</b>
+          <span class="tag" style="margin:0 6px">${esc(l.group_name)}</span>
+          ${tag}
+          <div style="font-size:13px;color:var(--muted);margin-top:4px">${fmtTime(l.start_ts)} ~ ${fmtTime(l.end_ts)}（${days}天）${l.reason ? ' · ' + esc(l.reason) : ''}</div>
+        </div>
+        <button class="btn-del" onclick="delLeave(${l.id})">删除</button>
+      </div>`;
+  }).join('');
+}
+
+async function delLeave(id) {
+  if (!confirm('确定删除该请假记录？删除后对应日期可能计入缺卡。')) return;
+  await fetch('/api/admin/leaves/' + id, { method: 'DELETE', headers: authHeaders() });
+  loadAll();
 }
 
 function renderGroups() {
@@ -224,6 +260,7 @@ function renderPersons() {
           <td><b>${esc(p.user_name)}</b></td>
           <td>${p.checkin_days} 天</td>
           <td><b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days} 天</b></td>
+          <td style="color:#e67e22">${p.leave_days || 0} 天</td>
           <td>${p.total_checkins} 次</td>
           <td><button class="btn-del" onclick="delPerson('${esc(p.user_name).replace(/'/g, "\\'")}')">清除记录</button></td>
         </tr>`).join('');
@@ -232,7 +269,7 @@ function renderPersons() {
         <h3 style="font-size:15px;margin-bottom:8px;color:var(--primary)">${esc(g.group_name)} <span class="tag">${esc(g.group_code)}</span></h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>人员</th><th>打卡天数</th><th>缺卡天数</th><th>总计</th><th>操作</th></tr></thead>
+            <thead><tr><th>人员</th><th>打卡天数</th><th>缺卡天数</th><th>请假天数</th><th>总计</th><th>操作</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>

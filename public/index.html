@@ -92,11 +92,44 @@
       <div class="records-section">
         <div class="records-header">
           <h3>打卡记录</h3>
-          <button id="btn-refresh" class="btn-text">刷新</button>
+          <div>
+            <button id="btn-ask-leave" class="btn-text" style="color:#e67e22">📝 请假</button>
+            <button id="btn-refresh" class="btn-text">刷新</button>
+          </div>
         </div>
+        <div id="leave-status" style="font-size:13px;margin-bottom:10px"></div>
         <div id="records-list" class="records-list"></div>
       </div>
     </section>
+
+    <!-- 请假弹窗 -->
+    <div id="leave-modal" class="modal hidden">
+      <div class="modal-content">
+        <h3>📝 请假申请</h3>
+        <p class="muted">提交后管理员可查看，请假期间不计入缺卡</p>
+        <div class="field-label" style="margin-bottom:8px">请假方式</div>
+        <select id="leave-mode" class="input" style="margin-bottom:12px">
+          <option value="days">按天数（从现在开始）</option>
+          <option value="range">按时间段</option>
+        </select>
+        <div id="leave-days-box">
+          <div class="field-label" style="margin-bottom:8px">请假天数</div>
+          <input id="leave-days" class="input" type="number" min="0.5" step="0.5" value="1">
+        </div>
+        <div id="leave-range-box" style="display:none">
+          <div class="field-label" style="margin:8px 0">开始时间</div>
+          <input id="leave-start" class="input" type="datetime-local">
+          <div class="field-label" style="margin:8px 0">结束时间</div>
+          <input id="leave-end" class="input" type="datetime-local">
+        </div>
+        <div class="field-label" style="margin:12px 0 8px">请假原因（选填）</div>
+        <input id="leave-reason" class="input" type="text" placeholder="如：生病、家中有事等">
+        <div class="modal-actions">
+          <button id="btn-submit-leave" class="btn btn-primary">提交请假</button>
+          <button id="btn-close-leave" class="btn btn-secondary">取消</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 邀请弹窗 -->
     <div id="invite-modal" class="modal hidden">
