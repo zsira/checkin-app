@@ -540,7 +540,7 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
        FROM checkins c JOIN groups g ON c.group_id = g.id
        ORDER BY c.created_at DESC`
     );
-    const dayKey = (ts) => new Date(ts).toLocaleDateString('zh-CN');
+    const dayKey = (ts) => new Date(Number(ts)).toLocaleDateString('zh-CN');
     const map = new Map();
     rows.rows.forEach(r => {
       const key = r.group_code + '|' + r.user_name;
@@ -665,7 +665,7 @@ app.get('/api/admin/export', auth, async (req, res) => {
     const lines = [headers.join(',')];
     for (const r of rows.rows) {
       lines.push([
-        new Date(r.created_at).toLocaleString('zh-CN'),
+        new Date(Number(r.created_at)).toLocaleString('zh-CN'),
         r.user_name, r.group_name, r.group_code,
         r.lat ?? '', r.lng ?? '', r.address ?? '', r.accuracy ?? ''
       ].map(escapeCsv).join(','));

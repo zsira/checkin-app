@@ -139,7 +139,7 @@ function renderStats() {
   const totalGroups = allGroups.length;
   const uniqueUsers = new Set(allCheckins.map(c => c.user_name)).size;
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const todayCount = allCheckins.filter(c => c.created_at >= today.getTime()).length;
+  const todayCount = allCheckins.filter(c => Number(c.created_at) >= today.getTime()).length;
 
   $('stats').innerHTML = [
     { num: totalGroups, label: '群组总数' },
@@ -251,7 +251,7 @@ function doExport() {
   window.location.href = url;
 }
 
-function fmtTime(ts) { return new Date(ts).toLocaleString('zh-CN'); }
+function fmtTime(ts) { return new Date(Number(ts)).toLocaleString('zh-CN'); }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 function setWatermark(name) {

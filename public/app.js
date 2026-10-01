@@ -432,7 +432,7 @@ function renderRecords(rows) {
   }
   list.innerHTML = rows.map(r => {
     const initial = (r.user_name || '?').charAt(0).toUpperCase();
-    const time = new Date(r.created_at).toLocaleString('zh-CN');
+    const time = new Date(Number(r.created_at)).toLocaleString('zh-CN');
     const addr = r.address
       ? `<div class="record-addr">📍 ${escapeHtml(r.address)}</div>`
       : (r.lat != null ? `<div class="record-addr"><a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank">📍 ${r.lat.toFixed(5)}, ${r.lng.toFixed(5)}</a></div>` : '');
