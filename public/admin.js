@@ -36,6 +36,11 @@ function init() {
   $('modal-cancel').onclick = closeModal;
   $('modal-save').onclick = saveEdit;
 
+  // 修改密码
+  $('btn-change-pwd').onclick = openPwdModal;
+  $('pwd-cancel').onclick = closePwdModal;
+  $('pwd-save').onclick = changePassword;
+
   ['filter-group', 'filter-user', 'filter-keyword', 'filter-person'].forEach(id => {
     $(id).addEventListener('input', () => { renderCheckins(); renderPersons(); });
   });
@@ -286,6 +291,42 @@ async function saveEdit() {
     loadAll();
   } catch (e) {
     alert('保存失败：' + e.message);
+  }
+}
+
+// ---------- 修改密码 ----------
+function openPwdModal() {
+  $('pwd-old').value = '';
+  $('pwd-new').value = '';
+  $('pwd-confirm').value = '';
+  $('pwd-error').textContent = '';
+  $('pwd-modal').classList.remove('hidden');
+}
+function closePwdModal() {
+  $('pwd-modal').classList.add('hidden');
+}
+async function changePassword() {
+  const oldPwd = $('pwd-old').value.trim();
+  const newPwd = $('pwd-new').value.trim();
+  const confirmPwd = $('pwd-confirm').value.trim();
+  $('pwd-error').textContent = '';
+  if (!oldPwd || !newPwd || !confirmPwd) { $('pwd-error').textContent = '请填写所有字段'; return; }
+  if (newPwd.length < 6) { $('pwd-error').textContent = '新密码至少 6 位'; return; }
+  if (newPwd !== confirmPwd) { $('pwd-error').textContent = '两次输入的新密码不一致'; return; }
+  try {
+    const res = await fetch('/api/admin/password', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ oldPassword: oldPwd, newPassword: newPwd }),
+    });
+    if (res.status === 401) { $('pwd-error').textContent = '旧密码错误'; return; }
+    const data = await res.json();
+    if (!res.ok) { $('pwd-error').textContent = data.error || '修改失败'; return; }
+    alert('密码修改成功，请重新登录');
+    closePwdModal();
+    logout();
+  } catch (e) {
+    $('pwd-error').textContent = '网络错误';
   }
 }
 

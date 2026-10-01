@@ -83,6 +83,7 @@
       <h1>📋 打卡管理后台</h1>
       <div>
         <a href="index.html">← 返回打卡</a>
+        <button id="btn-change-pwd" class="btn-logout">修改密码</button>
         <button id="btn-logout" class="btn-logout">退出登录</button>
       </div>
     </div>
@@ -139,6 +140,30 @@
       <div class="modal-actions">
         <button class="btn-cancel" id="modal-cancel">取消</button>
         <button class="btn-save" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修改密码弹窗 -->
+  <div id="pwd-modal" class="modal-mask hidden">
+    <div class="modal">
+      <h3>修改管理员密码</h3>
+      <div class="field">
+        <label>旧密码</label>
+        <input id="pwd-old" type="password" placeholder="请输入当前密码">
+      </div>
+      <div class="field">
+        <label>新密码（至少6位）</label>
+        <input id="pwd-new" type="password" placeholder="请输入新密码">
+      </div>
+      <div class="field">
+        <label>确认新密码</label>
+        <input id="pwd-confirm" type="password" placeholder="请再次输入新密码">
+      </div>
+      <div id="pwd-error" style="color:var(--danger);font-size:13px;min-height:18px"></div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="pwd-cancel">取消</button>
+        <button class="btn-save" id="pwd-save">确认修改</button>
       </div>
     </div>
   </div>

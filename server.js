@@ -70,6 +70,25 @@ addColumnIfMissing('groups', 'center_lng', 'REAL');
 addColumnIfMissing('groups', 'radius', 'INTEGER DEFAULT 0');
 addColumnIfMissing('groups', 'creator', 'TEXT');
 
+// 管理员设置表（存储密码等配置）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS admin_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+`);
+// 初始化密码：优先用环境变量，其次用数据库，最后默认 admin123
+const envPassword = process.env.ADMIN_PASSWORD;
+if (envPassword) {
+  db.prepare('INSERT OR REPLACE INTO admin_settings (key, value) VALUES (?, ?)').run('password', envPassword);
+} else if (!db.prepare('SELECT value FROM admin_settings WHERE key = ?').get('password')) {
+  db.prepare('INSERT INTO admin_settings (key, value) VALUES (?, ?)').run('password', 'admin123');
+}
+function getAdminPassword() {
+  const row = db.prepare('SELECT value FROM admin_settings WHERE key = ?').get('password');
+  return row ? row.value : 'admin123';
+}
+
 // ---------- 工具函数 ----------
 function genCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -157,10 +176,22 @@ const validTokens = new Set();
 
 app.post('/api/admin/login', (req, res) => {
   const { password } = req.body || {};
-  if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: '密码错误' });
+  if (password !== getAdminPassword()) return res.status(401).json({ error: '密码错误' });
   const token = crypto.randomBytes(32).toString('hex');
   validTokens.add(token);
   res.json({ token });
+});
+
+// 修改管理员密码
+app.put('/api/admin/password', auth, (req, res) => {
+  const { oldPassword, newPassword } = req.body || {};
+  if (!oldPassword || !newPassword) return res.status(400).json({ error: '请输入旧密码和新密码' });
+  if (newPassword.length < 6) return res.status(400).json({ error: '新密码至少 6 位' });
+  if (oldPassword !== getAdminPassword()) return res.status(401).json({ error: '旧密码错误' });
+  db.prepare('UPDATE admin_settings SET value = ? WHERE key = ?').run(newPassword, 'password');
+  // 清除所有 token，强制重新登录
+  validTokens.clear();
+  res.json({ ok: true });
 });
 
 function auth(req, res, next) {
