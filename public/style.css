@@ -20,6 +20,34 @@ body {
   color: var(--text);
   min-height: 100vh;
   line-height: 1.5;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* 水印层 */
+.watermark {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  overflow: hidden;
+  opacity: 0.08;
+}
+.watermark span {
+  width: 50%;
+  padding: 40px 20px;
+  font-size: 18px;
+  color: #000;
+  font-weight: 700;
+  transform: rotate(-25deg);
+  text-align: center;
+  white-space: nowrap;
 }
 
 #app {

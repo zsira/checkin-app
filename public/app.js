@@ -93,6 +93,14 @@ function toast(msg, type) {
   toastTimer = setTimeout(() => el.classList.add('hidden'), 2200);
 }
 
+// 生成全屏水印（半透明显示用户名，截屏可追溯来源）
+function setWatermark(name) {
+  const wm = $('watermark');
+  if (!wm) return;
+  const text = name + ' · ' + new Date().toLocaleDateString('zh-CN');
+  wm.innerHTML = Array(20).fill(`<span>${escapeHtml(text)}</span>`).join('');
+}
+
 // ---------- 初始化 ----------
 let deferredPrompt = null;
 
@@ -101,6 +109,16 @@ function init() {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('service-worker.js').catch(() => {});
   }
+
+  // 防截屏：禁用右键、复制、拖拽
+  document.addEventListener('contextmenu', e => e.preventDefault());
+  document.addEventListener('copy', e => e.preventDefault());
+  document.addEventListener('cut', e => e.preventDefault());
+  document.addEventListener('dragstart', e => e.preventDefault());
+
+  // 生成水印（显示当前用户名，截屏可追溯）
+  const name = localStorage.getItem('ci_name') || '';
+  if (name) setWatermark(name);
 
   // PWA 安装提示
   window.addEventListener('beforeinstallprompt', (e) => {
@@ -137,6 +155,7 @@ function bindEvents() {
     if (!name) return toast('请输入名字');
     state.userName = name;
     localStorage.setItem('ci_name', name);
+    setWatermark(name);
     showGroupView();
   };
 

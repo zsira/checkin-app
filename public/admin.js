@@ -11,6 +11,14 @@ let editing = null; // { type: 'group'|'checkin', id, data }
 
 // ---------- 初始化 ----------
 function init() {
+  // 防截屏：禁用右键、复制
+  document.addEventListener('contextmenu', e => e.preventDefault());
+  document.addEventListener('copy', e => e.preventDefault());
+  document.addEventListener('cut', e => e.preventDefault());
+
+  // 管理后台水印
+  setWatermark('管理员');
+
   const token = getToken();
   if (token) {
     // 验证 token 是否有效
@@ -209,6 +217,13 @@ function doExport() {
 
 function fmtTime(ts) { return new Date(ts).toLocaleString('zh-CN'); }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function setWatermark(name) {
+  const wm = $('watermark');
+  if (!wm) return;
+  const text = name + ' · ' + new Date().toLocaleDateString('zh-CN');
+  wm.innerHTML = Array(20).fill(`<span>${esc(text)}</span>`).join('');
+}
 
 // ---------- 编辑功能 ----------
 function editGroup(id) {
