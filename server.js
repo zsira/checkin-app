@@ -5,7 +5,6 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,9 +12,19 @@ const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
 // 代理（沙箱环境需要，生产环境可留空）
-const proxyAgent = (process.env.HTTPS_PROXY || process.env.https_proxy)
-  ? new HttpsProxyAgent(process.env.HTTPS_PROXY || process.env.https_proxy)
-  : null;
+// https-proxy-agent v9 是 ESM-only，需动态导入
+let proxyAgent = null;
+(async () => {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (proxyUrl) {
+    try {
+      const mod = await import('https-proxy-agent');
+      proxyAgent = new mod.HttpsProxyAgent(proxyUrl);
+    } catch (e) {
+      console.error('[代理] 加载 https-proxy-agent 失败:', e.message);
+    }
+  }
+})();
 
 app.use(express.json());
 
