@@ -38,6 +38,17 @@ function init() {
   $('modal-cancel').onclick = closeModal;
   $('modal-save').onclick = saveEdit;
 
+  // 创建群组
+  $('btn-create-group').onclick = openCreateGroup;
+  $('cg-cancel').onclick = closeCreateGroup;
+  $('cg-save').onclick = createGroup;
+
+  // 邀请
+  $('invite-close').onclick = closeInvite;
+  $('btn-copy-code').onclick = () => copyText($('invite-code').textContent);
+  $('btn-copy-link').onclick = () => copyText($('invite-link').textContent);
+  $('btn-share').onclick = shareInvite;
+
   // 修改密码
   $('btn-change-pwd').onclick = openPwdModal;
   $('pwd-cancel').onclick = closePwdModal;
@@ -155,7 +166,10 @@ function renderGroups() {
         <td style="font-size:12px">${timesText}</td>
         <td>${g.checkin_count}</td>
         <td>${fmtTime(g.created_at)}</td>
-        <td><button class="btn-edit" onclick="editGroup(${g.id})">✏️ 编辑</button></td>
+        <td>
+          <button class="btn-edit" onclick="inviteGroup(${g.id})">📨 邀请</button>
+          <button class="btn-edit" onclick="editGroup(${g.id})">✏️ 编辑</button>
+        </td>
       </tr>`;
   }).join('');
 }
@@ -428,6 +442,97 @@ async function delAdmin(id, name) {
   if (!confirm(`确定删除管理员「${name}」？`)) return;
   await fetch('/api/admin/admins/' + id, { method: 'DELETE', headers: authHeaders() });
   loadAdmins();
+}
+
+// ---------- 创建群组 ----------
+function openCreateGroup() {
+  $('cg-name').value = '';
+  $('cg-lat').value = '';
+  $('cg-lng').value = '';
+  $('cg-radius').value = '0';
+  $('cg-error').textContent = '';
+  $('create-group-modal').classList.remove('hidden');
+}
+function closeCreateGroup() {
+  $('create-group-modal').classList.add('hidden');
+}
+async function createGroup() {
+  const name = $('cg-name').value.trim();
+  const lat = $('cg-lat').value.trim();
+  const lng = $('cg-lng').value.trim();
+  const radius = parseInt($('cg-radius').value) || 0;
+  $('cg-error').textContent = '';
+  if (!name) { $('cg-error').textContent = '请输入群组名称'; return; }
+  try {
+    const body = { name };
+    if (lat && lng) {
+      body.center_lat = parseFloat(lat);
+      body.center_lng = parseFloat(lng);
+      body.radius = radius;
+    }
+    const res = await fetch('/api/groups', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) { $('cg-error').textContent = data.error || '创建失败'; return; }
+    closeCreateGroup();
+    alert(`群组「${data.name}」创建成功！\n邀请码：${data.code}`);
+    loadAll();
+    // 创建成功后直接打开邀请弹窗
+    inviteGroup(data.id);
+  } catch (e) {
+    $('cg-error').textContent = '网络错误';
+  }
+}
+
+// ---------- 邀请 ----------
+function inviteGroup(id) {
+  const g = allGroups.find(x => x.id === id);
+  if (!g) return;
+  $('invite-group-name').textContent = g.name;
+  $('invite-code').textContent = g.code;
+  const link = location.origin + location.pathname.replace('admin.html', 'index.html') + '?code=' + g.code;
+  $('invite-link').textContent = link;
+  // 系统分享按钮
+  const shareBtn = $('btn-share');
+  if (navigator.share) {
+    shareBtn.style.display = '';
+  } else {
+    shareBtn.style.display = 'none';
+  }
+  $('invite-modal').classList.remove('hidden');
+}
+function closeInvite() {
+  $('invite-modal').classList.add('hidden');
+}
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    alert('已复制到剪贴板');
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); alert('已复制到剪贴板'); }
+    catch { alert('复制失败，请手动复制'); }
+    ta.remove();
+  }
+}
+async function shareInvite() {
+  if (!navigator.share) return;
+  const code = $('invite-code').textContent;
+  const name = $('invite-group-name').textContent;
+  const link = $('invite-link').textContent;
+  try {
+    await navigator.share({
+      title: '打卡邀请',
+      text: `邀请你加入「${name}」打卡群\n邀请码：${code}`,
+      url: link,
+    });
+  } catch (e) {}
 }
 
 init();

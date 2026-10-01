@@ -119,7 +119,10 @@
     </div>
 
     <div class="panel">
-      <h2>所有群组</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">所有群组</h2>
+        <button id="btn-create-group" class="btn-export" style="background:var(--primary)">+ 创建群组</button>
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>群组名</th><th>邀请码</th><th>打卡范围</th><th>打卡时段</th><th>打卡数</th><th>创建时间</th><th>操作</th></tr></thead>
@@ -199,6 +202,64 @@
       <div class="modal-actions">
         <button class="btn-cancel" id="pwd-cancel">取消</button>
         <button class="btn-save" id="pwd-save">确认修改</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 创建群组弹窗 -->
+  <div id="create-group-modal" class="modal-mask hidden">
+    <div class="modal">
+      <h3>创建打卡群组</h3>
+      <div class="field">
+        <label>群组名称</label>
+        <input id="cg-name" type="text" placeholder="如：晨跑小队" maxlength="30">
+      </div>
+      <div class="field">
+        <label>中心点纬度（不限制留空）</label>
+        <input id="cg-lat" type="text" placeholder="如 39.904">
+      </div>
+      <div class="field">
+        <label>中心点经度（不限制留空）</label>
+        <input id="cg-lng" type="text" placeholder="如 116.407">
+      </div>
+      <div class="field">
+        <label>打卡范围（米，0=不限制）</label>
+        <input id="cg-radius" type="number" value="0" min="0" max="100000">
+      </div>
+      <div id="cg-error" style="color:var(--danger);font-size:13px;min-height:18px"></div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="cg-cancel">取消</button>
+        <button class="btn-save" id="cg-save">创建</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 邀请弹窗 -->
+  <div id="invite-modal" class="modal-mask hidden">
+    <div class="modal">
+      <h3>邀请成员加入</h3>
+      <p class="muted" style="font-size:13px;margin-bottom:12px">把邀请码或链接发给成员，成员在打卡 App 输入邀请码即可加入</p>
+      <div class="field">
+        <label>群组</label>
+        <div id="invite-group-name" style="font-weight:600;font-size:16px"></div>
+      </div>
+      <div class="field">
+        <label>邀请码</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div id="invite-code" style="flex:1;padding:12px;background:var(--primary-light);color:var(--primary);border-radius:8px;font-size:20px;font-weight:700;letter-spacing:4px;text-align:center;font-family:monospace"></div>
+          <button class="btn-save" id="btn-copy-code" style="flex:none;padding:12px 16px">复制</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>邀请链接</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div id="invite-link" style="flex:1;padding:10px;background:#f5f5f5;border-radius:8px;font-size:12px;color:var(--muted);word-break:break-all;max-height:60px;overflow:auto"></div>
+          <button class="btn-save" id="btn-copy-link" style="flex:none;padding:12px 16px">复制</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="invite-close">关闭</button>
+        <button class="btn-save" id="btn-share" style="display:none">系统分享</button>
       </div>
     </div>
   </div>

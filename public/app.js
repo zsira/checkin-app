@@ -168,19 +168,12 @@ function bindEvents() {
     showView('setup');
   };
 
-  $('btn-create-group').onclick = createGroup;
   $('btn-join-group').onclick = joinGroup;
 
   $('btn-checkin').onclick = doCheckin;
   $('btn-refresh').onclick = loadRecords;
-  $('btn-invite').onclick = openInvite;
   $('btn-leave').onclick = leaveGroup;
   $('btn-install').onclick = installApp;
-
-  $('btn-copy-code').onclick = () => copyText(state.groupCode);
-  $('btn-copy-link').onclick = () => copyText(getInviteLink());
-  $('btn-share').onclick = shareInvite;
-  $('btn-close-invite').onclick = () => $('invite-modal').classList.add('hidden');
 
   // 打卡范围
   $('btn-set-range').onclick = openRangeModal;
@@ -192,7 +185,6 @@ function bindEvents() {
 
   // 回车
   $('input-name').onkeydown = (e) => e.key === 'Enter' && $('btn-continue').click();
-  $('input-group-name').onkeydown = (e) => e.key === 'Enter' && $('btn-create-group').click();
   $('input-group-code').onkeydown = (e) => e.key === 'Enter' && $('btn-join-group').click();
 
   // 引导弹窗
@@ -213,28 +205,6 @@ function bindEvents() {
 function showGroupView() {
   $('greeting-name').textContent = state.userName;
   showView('group');
-}
-
-async function createGroup() {
-  const name = $('input-group-name').value.trim();
-  if (!name) return toast('请输入群组名称');
-  try {
-    const res = await fetch('/api/groups', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, userName: state.userName }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    state.groupCode = data.code;
-    state.groupName = data.name;
-    state.isCreator = true;
-    localStorage.setItem('ci_group', data.code);
-    localStorage.setItem('ci_group_name', data.name);
-    enterGroup(data.code, data.name);
-  } catch (e) {
-    toast(e.message || '创建失败');
-  }
 }
 
 async function joinGroup() {
@@ -273,14 +243,12 @@ async function loadGroupSettings() {
     state.centerLat = g.center_lat;
     state.centerLng = g.center_lng;
     state.radius = g.radius || 0;
-    // 更新创建者判断
-    state.isCreator = !!g.creator && g.creator === state.userName;
-    // 非创建者隐藏"设置打卡范围"按钮
+    // 打卡范围由管理员统一管理，用户端不显示设置按钮
     const setRangeBtn = $('btn-set-range');
     const setRangeBtn2 = $('btn-set-range2');
-    if (setRangeBtn) setRangeBtn.style.display = state.isCreator ? '' : 'none';
-    if (setRangeBtn2) setRangeBtn2.style.display = state.isCreator ? '' : 'none';
-    // 同步群组名（邀请链接进入时可能旧）
+    if (setRangeBtn) setRangeBtn.style.display = 'none';
+    if (setRangeBtn2) setRangeBtn2.style.display = 'none';
+    // 同步群组名
     if (g.name && g.name !== state.groupName) {
       state.groupName = g.name;
       localStorage.setItem('ci_group_name', g.name);
@@ -484,48 +452,6 @@ function escapeHtml(s) {
   const div = document.createElement('div');
   div.textContent = s;
   return div.innerHTML;
-}
-
-// ---------- 邀请 ----------
-function getInviteLink() {
-  const base = location.origin + location.pathname;
-  return `${base}?code=${state.groupCode}`;
-}
-
-function openInvite() {
-  $('invite-code').textContent = state.groupCode;
-  $('invite-link').textContent = getInviteLink();
-  // 系统分享按钮
-  if (navigator.share) {
-    $('btn-share').classList.remove('hidden');
-  } else {
-    $('btn-share').classList.add('hidden');
-  }
-  $('invite-modal').classList.remove('hidden');
-}
-
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('已复制');
-  } catch (e) {
-    // 降级方案
-    const ta = document.createElement('textarea');
-    ta.value = text; document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); toast('已复制'); } catch { toast('复制失败，请手动复制'); }
-    ta.remove();
-  }
-}
-
-async function shareInvite() {
-  if (!navigator.share) return;
-  try {
-    await navigator.share({
-      title: '一起打卡吧',
-      text: `邀请你加入「${state.groupName}」打卡群，邀请码：${state.groupCode}`,
-      url: getInviteLink(),
-    });
-  } catch (e) {}
 }
 
 // ---------- 打卡范围 ----------

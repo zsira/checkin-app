@@ -294,9 +294,10 @@ app.delete('/api/admin/admins/:id', auth, async (req, res) => {
 });
 
 // ---------- 群组 API ----------
-app.post('/api/groups', async (req, res) => {
+// 创建群组：仅管理员可创建（需 admin token）
+app.post('/api/groups', auth, async (req, res) => {
   try {
-    const { name, userName } = req.body || {};
+    const { name, center_lat, center_lng, radius } = req.body || {};
     if (!name || !name.trim()) return res.status(400).json({ error: '请输入群组名称' });
     let code, existing;
     do {
@@ -304,12 +305,13 @@ app.post('/api/groups', async (req, res) => {
       const r = await pool.query('SELECT id FROM groups WHERE code = $1', [code]);
       existing = r.rows[0];
     } while (existing);
-    const creator = (userName || '').trim() || null;
+    // 创建者记录为管理员用户名
+    const creator = req.admin.username;
     const info = await pool.query(
-      'INSERT INTO groups (code, name, creator, created_at) VALUES ($1, $2, $3, $4) RETURNING id',
-      [code, name.trim(), creator, now()]
+      'INSERT INTO groups (code, name, creator, center_lat, center_lng, radius, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+      [code, name.trim(), creator, center_lat ?? null, center_lng ?? null, radius ?? 0, now()]
     );
-    res.json({ id: info.rows[0].id, code, name: name.trim(), creator, center_lat: null, center_lng: null, radius: 0 });
+    res.json({ id: info.rows[0].id, code, name: name.trim(), creator, center_lat: center_lat ?? null, center_lng: center_lng ?? null, radius: radius ?? 0 });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
