@@ -110,41 +110,21 @@
       <div class="filter-row">
         <input id="filter-person" placeholder="搜索成员姓名" style="flex:1;min-width:200px">
       </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>人员</th><th>打卡天数</th><th>缺卡天数</th><th>总计</th><th>操作</th></tr></thead>
-          <tbody id="persons-body"></tbody>
-        </table>
-      </div>
+      <div id="persons-container"></div>
     </div>
 
     <div class="panel">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <h2 style="margin:0">所有群组</h2>
-        <button id="btn-create-group" class="btn-export" style="background:var(--primary)">+ 创建群组</button>
+        <div style="display:flex;gap:8px">
+          <button id="btn-export" class="btn-export">📥 导出 Excel</button>
+          <button id="btn-create-group" class="btn-export" style="background:var(--primary)">+ 创建群组</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>群组名</th><th>邀请码</th><th>打卡范围</th><th>打卡时段</th><th>打卡数</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody id="groups-body"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <h2 style="margin:0">打卡记录</h2>
-        <button id="btn-export" class="btn-export">📥 导出 Excel</button>
-      </div>
-      <div class="filter-row">
-        <input id="filter-group" placeholder="按群组筛选" style="width:140px">
-        <input id="filter-user" placeholder="按用户筛选" style="width:140px">
-        <input id="filter-keyword" placeholder="搜索地址">
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>时间</th><th>用户</th><th>群组</th><th>位置</th><th>操作</th></tr></thead>
-          <tbody id="checkins-body"></tbody>
         </table>
       </div>
     </div>

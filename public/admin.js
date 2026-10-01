@@ -61,9 +61,7 @@ function init() {
   $('adm-cancel').onclick = closeAdminModal;
   $('adm-save').onclick = addAdmin;
 
-  ['filter-group', 'filter-user', 'filter-keyword', 'filter-person'].forEach(id => {
-    $(id).addEventListener('input', () => { renderCheckins(); renderPersons(); });
-  });
+  $('filter-person').addEventListener('input', () => { renderPersons(); });
 }
 
 function showLogin() {
@@ -121,7 +119,6 @@ async function loadAll() {
     renderStats();
     renderGroups();
     renderPersons();
-    renderCheckins();
     // 超管功能
     if (currentAdmin && currentAdmin.is_super) {
       $('panel-admins').style.display = '';
@@ -181,22 +178,46 @@ function renderGroups() {
 
 function renderPersons() {
   const fp = $('filter-person')?.value.trim().toLowerCase() || '';
-  // 使用 memberStats（按群组+用户分组，含打卡天数）
   let persons = memberStats.slice();
   if (fp) persons = persons.filter(p => p.user_name.toLowerCase().includes(fp));
-  persons.sort((a, b) => b.checkin_days - a.checkin_days || b.total_checkins - a.total_checkins);
 
-  const body = $('persons-body');
-  if (!persons.length) { body.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px">暂无成员</td></tr>'; return; }
-  body.innerHTML = persons.map(p => `
-    <tr>
-      <td><b>${esc(p.user_name)}</b><br><span class="tag" style="margin-top:2px">${esc(p.group_name)}</span></td>
-      <td>${p.checkin_days} 天</td>
-      <td><b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days} 天</b></td>
-      <td>${p.total_checkins} 次</td>
-      <td><button class="btn-del" onclick="delPerson('${esc(p.user_name).replace(/'/g, "\\'")}')">清除记录</button></td>
-    </tr>
-  `).join('');
+  const container = $('persons-container');
+  if (!persons.length) {
+    container.innerHTML = '<div style="color:var(--muted);text-align:center;padding:24px">暂无成员</div>';
+    return;
+  }
+
+  // 按群组分组
+  const groupMap = new Map();
+  persons.forEach(p => {
+    if (!groupMap.has(p.group_code)) {
+      groupMap.set(p.group_code, { group_name: p.group_name, group_code: p.group_code, members: [] });
+    }
+    groupMap.get(p.group_code).members.push(p);
+  });
+
+  container.innerHTML = Array.from(groupMap.values()).map(g => {
+    const rows = g.members
+      .sort((a, b) => b.checkin_days - a.checkin_days || b.total_checkins - a.total_checkins)
+      .map(p => `
+        <tr>
+          <td><b>${esc(p.user_name)}</b></td>
+          <td>${p.checkin_days} 天</td>
+          <td><b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days} 天</b></td>
+          <td>${p.total_checkins} 次</td>
+          <td><button class="btn-del" onclick="delPerson('${esc(p.user_name).replace(/'/g, "\\'")}')">清除记录</button></td>
+        </tr>`).join('');
+    return `
+      <div style="margin-bottom:20px">
+        <h3 style="font-size:15px;margin-bottom:8px;color:var(--primary)">${esc(g.group_name)} <span class="tag">${esc(g.group_code)}</span></h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>人员</th><th>打卡天数</th><th>缺卡天数</th><th>总计</th><th>操作</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 async function delPerson(name) {
