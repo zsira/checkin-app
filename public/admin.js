@@ -7,6 +7,7 @@ function authHeaders() { return { 'Authorization': 'Bearer ' + getToken() }; }
 let allCheckins = [];
 let allGroups = [];
 let refreshTimer = null;
+let editing = null; // { type: 'group'|'checkin', id, data }
 
 // ---------- 初始化 ----------
 function init() {
@@ -24,6 +25,8 @@ function init() {
   $('login-password').onkeydown = (e) => e.key === 'Enter' && doLogin();
   $('btn-logout').onclick = logout;
   $('btn-export').onclick = doExport;
+  $('modal-cancel').onclick = closeModal;
+  $('modal-save').onclick = saveEdit;
 
   ['filter-group', 'filter-user', 'filter-keyword', 'filter-person'].forEach(id => {
     $(id).addEventListener('input', () => { renderCheckins(); renderPersons(); });
@@ -104,7 +107,7 @@ function renderStats() {
 
 function renderGroups() {
   const body = $('groups-body');
-  if (!allGroups.length) { body.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px">暂无群组</td></tr>'; return; }
+  if (!allGroups.length) { body.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px">暂无群组</td></tr>'; return; }
   body.innerHTML = allGroups.map(g => {
     const range = g.radius > 0 && g.center_lat != null
       ? `${g.center_lat.toFixed(4)}, ${g.center_lng.toFixed(4)} · ${g.radius}m`
@@ -116,6 +119,7 @@ function renderGroups() {
         <td>${range}</td>
         <td>${g.checkin_count}</td>
         <td>${fmtTime(g.created_at)}</td>
+        <td><button class="btn-edit" onclick="editGroup(${g.id})">✏️ 编辑</button></td>
       </tr>`;
   }).join('');
 }
@@ -184,7 +188,10 @@ function renderCheckins() {
         <td><b>${esc(c.user_name)}</b></td>
         <td><span class="tag">${esc(c.group_code)}</span> ${esc(c.group_name)}</td>
         <td class="addr-cell">${c.address ? esc(c.address) : '-'}<br>${loc}${c.accuracy ? ` · 精度${Math.round(c.accuracy)}m` : ''}</td>
-        <td><button class="btn-del" onclick="delCheckin(${c.id})">删除</button></td>
+        <td>
+          <button class="btn-edit" onclick="editCheckin(${c.id})">✏️</button>
+          <button class="btn-del" onclick="delCheckin(${c.id})">删除</button>
+        </td>
       </tr>`;
   }).join('');
 }
@@ -202,5 +209,69 @@ function doExport() {
 
 function fmtTime(ts) { return new Date(ts).toLocaleString('zh-CN'); }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ---------- 编辑功能 ----------
+function editGroup(id) {
+  const g = allGroups.find(x => x.id === id);
+  if (!g) return;
+  editing = { type: 'group', id, data: { ...g } };
+  $('modal-title').textContent = '编辑群组';
+  $('modal-fields').innerHTML = `
+    <div class="field"><label>群组名称</label><input id="ef-name" value="${esc(g.name)}"></div>
+    <div class="field"><label>中心点纬度（不限制留空）</label><input id="ef-lat" value="${g.center_lat ?? ''}" placeholder="如 22.951"></div>
+    <div class="field"><label>中心点经度（不限制留空）</label><input id="ef-lng" value="${g.center_lng ?? ''}" placeholder="如 113.877"></div>
+    <div class="field"><label>打卡范围（米，0=不限制）</label><input id="ef-radius" type="number" value="${g.radius ?? 0}"></div>
+  `;
+  $('edit-modal').classList.remove('hidden');
+}
+
+function editCheckin(id) {
+  const c = allCheckins.find(x => x.id === id);
+  if (!c) return;
+  editing = { type: 'checkin', id, data: { ...c } };
+  $('modal-title').textContent = '编辑打卡记录';
+  $('modal-fields').innerHTML = `
+    <div class="field"><label>用户姓名</label><input id="ef-user" value="${esc(c.user_name)}"></div>
+    <div class="field"><label>地点/公司名</label><input id="ef-addr" value="${esc(c.address || '')}" placeholder="如：XX公司前台"></div>
+  `;
+  $('edit-modal').classList.remove('hidden');
+}
+
+function closeModal() {
+  editing = null;
+  $('edit-modal').classList.add('hidden');
+}
+
+async function saveEdit() {
+  if (!editing) return;
+  try {
+    if (editing.type === 'group') {
+      const name = $('ef-name').value.trim();
+      const lat = $('ef-lat').value.trim();
+      const lng = $('ef-lng').value.trim();
+      const radius = parseInt($('ef-radius').value) || 0;
+      if (!name) { alert('群组名称不能为空'); return; }
+      const body = { name, radius };
+      if (lat && lng) { body.center_lat = parseFloat(lat); body.center_lng = parseFloat(lng); }
+      else { body.center_lat = null; body.center_lng = null; }
+      await fetch('/api/admin/groups/' + editing.id, {
+        method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } else {
+      const user_name = $('ef-user').value.trim();
+      const address = $('ef-addr').value.trim();
+      if (!user_name) { alert('用户名不能为空'); return; }
+      await fetch('/api/admin/checkins/' + editing.id, {
+        method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_name, address }),
+      });
+    }
+    closeModal();
+    loadAll();
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  }
+}
 
 init();

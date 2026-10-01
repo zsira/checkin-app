@@ -281,6 +281,35 @@ app.delete('/api/admin/checkins/:id', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+// 编辑打卡记录（用户名、地址）
+app.put('/api/admin/checkins/:id', auth, (req, res) => {
+  const { user_name, address } = req.body;
+  const fields = [];
+  const values = [];
+  if (user_name !== undefined) { fields.push('user_name = ?'); values.push(user_name); }
+  if (address !== undefined) { fields.push('address = ?'); values.push(address); }
+  if (!fields.length) return res.status(400).json({ error: '没有可更新的字段' });
+  values.push(req.params.id);
+  db.prepare(`UPDATE checkins SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  res.json({ ok: true });
+});
+
+// 编辑群组信息（名称、中心点、范围）
+app.put('/api/admin/groups/:id', auth, (req, res) => {
+  const { name, center_lat, center_lng, radius, creator } = req.body;
+  const fields = [];
+  const values = [];
+  if (name !== undefined) { fields.push('name = ?'); values.push(name); }
+  if (center_lat !== undefined) { fields.push('center_lat = ?'); values.push(center_lat); }
+  if (center_lng !== undefined) { fields.push('center_lng = ?'); values.push(center_lng); }
+  if (radius !== undefined) { fields.push('radius = ?'); values.push(radius); }
+  if (creator !== undefined) { fields.push('creator = ?'); values.push(creator); }
+  if (!fields.length) return res.status(400).json({ error: '没有可更新的字段' });
+  values.push(req.params.id);
+  db.prepare(`UPDATE groups SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  res.json({ ok: true });
+});
+
 // 导出 CSV（Excel 可直接打开）
 app.get('/api/admin/export', auth, (req, res) => {
   const rows = db.prepare(
