@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="打卡">
+  <meta name="apple-mobile-web-app-status-bar-style" content="#4f46e5">
+  <title>打卡 · CheckIn</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 视图1：设置用户名 -->
+    <section id="view-setup" class="view active">
+      <div class="hero">
+        <div class="logo">✓</div>
+        <h1>欢迎使用打卡</h1>
+        <p class="subtitle">自动定位 · 团队打卡 · 记录可查</p>
+      </div>
+      <div class="card">
+        <label class="field-label">你的名字</label>
+        <input id="input-name" class="input" type="text" placeholder="请输入昵称" maxlength="20">
+        <button id="btn-continue" class="btn btn-primary">继续</button>
+      </div>
+    </section>
+
+    <!-- 视图2：创建或加入群组 -->
+    <section id="view-group" class="view">
+      <header class="topbar">
+        <span class="greeting">你好，<b id="greeting-name"></b></span>
+        <button id="btn-change-name" class="btn-text">切换</button>
+      </header>
+      <div class="card">
+        <h2>创建打卡群组</h2>
+        <p class="muted">发起一个新的打卡活动，邀请朋友一起</p>
+        <input id="input-group-name" class="input" type="text" placeholder="群组名称，如：晨跑小队" maxlength="30">
+        <button id="btn-create-group" class="btn btn-primary">创建群组</button>
+      </div>
+      <div class="divider"><span>或</span></div>
+      <div class="card">
+        <h2>加入已有群组</h2>
+        <p class="muted">输入朋友分享的 6 位邀请码</p>
+        <input id="input-group-code" class="input input-code" type="text" placeholder="邀请码" maxlength="6" autocomplete="off">
+        <button id="btn-join-group" class="btn btn-secondary">加入群组</button>
+      </div>
+      <div style="text-align:center;margin-top:16px">
+        <a href="admin.html" style="color:var(--muted);font-size:13px;text-decoration:none">⚙️ 管理后台</a>
+      </div>
+    </section>
+
+    <!-- 视图3：打卡主页 -->
+    <section id="view-main" class="view">
+      <header class="topbar">
+        <div class="group-info">
+          <h2 id="group-name"></h2>
+          <span class="group-code" id="group-code-label"></span>
+        </div>
+        <div>
+          <button id="btn-install" class="btn-text">📲 安装</button>
+          <button id="btn-leave" class="btn-text">退出</button>
+        </div>
+      </header>
+
+      <div class="checkin-area">
+        <button id="btn-checkin" class="checkin-btn">
+          <div class="checkin-icon">📍</div>
+          <div class="checkin-text">点击打卡</div>
+          <div class="checkin-sub">自动获取定位</div>
+        </button>
+        <input id="input-location-note" class="input" type="text" placeholder="选填：填写地点/公司名（如：XX公司前台）" maxlength="50" style="margin-top:12px">
+        <div id="location-status" class="location-status"></div>
+      </div>
+
+      <div class="range-info" id="range-info">
+        <span class="range-icon">🎯</span>
+        <span id="range-text">未设置打卡范围（任意位置可打卡）</span>
+        <button id="btn-set-range" class="btn-text range-edit">设置</button>
+      </div>
+
+      <div class="action-row btn-row">
+        <button id="btn-invite" class="btn btn-secondary">
+          <span>📨 邀请好友</span>
+        </button>
+        <button id="btn-set-range2" class="btn btn-secondary">
+          <span>🎯 打卡范围</span>
+        </button>
+      </div>
+
+      <div class="records-section">
+        <div class="records-header">
+          <h3>打卡记录</h3>
+          <button id="btn-refresh" class="btn-text">刷新</button>
+        </div>
+        <div id="records-list" class="records-list"></div>
+      </div>
+    </section>
+
+    <!-- 邀请弹窗 -->
+    <div id="invite-modal" class="modal hidden">
+      <div class="modal-content">
+        <h3>邀请好友打卡</h3>
+        <p class="muted">把邀请码或链接发给朋友即可一起打卡</p>
+        <div class="code-display" id="invite-code"></div>
+        <div class="link-display" id="invite-link"></div>
+        <div class="modal-actions">
+          <button id="btn-copy-code" class="btn btn-secondary">复制邀请码</button>
+          <button id="btn-copy-link" class="btn btn-primary">复制链接</button>
+          <button id="btn-share" class="btn btn-primary hidden">系统分享</button>
+        </div>
+        <button id="btn-close-invite" class="btn-text modal-close">关闭</button>
+      </div>
+    </div>
+
+    <!-- 打卡范围弹窗 -->
+    <div id="range-modal" class="modal hidden">
+      <div class="modal-content">
+        <h3>设置打卡范围</h3>
+        <p class="muted">设置中心点和允许半径，成员必须在范围内才能打卡</p>
+        <div class="field-label" style="margin-bottom:8px">中心点</div>
+        <div id="range-center-display" class="link-display" style="margin-bottom:12px">未获取</div>
+        <div class="btn-row" style="margin-bottom:16px">
+          <button id="btn-use-location" class="btn btn-secondary" style="margin-top:0">用我的位置</button>
+          <button id="btn-clear-center" class="btn btn-secondary" style="margin-top:0">清除</button>
+        </div>
+        <div class="field-label" style="margin-bottom:8px">允许半径（米）</div>
+        <input id="input-radius" class="input" type="number" min="0" max="100000" placeholder="如 200" value="200">
+        <p class="muted" style="margin-top:8px">设为 0 表示不限制范围</p>
+        <div class="modal-actions">
+          <button id="btn-save-range" class="btn btn-primary">保存</button>
+          <button id="btn-close-range" class="btn btn-secondary">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 引导弹窗（安装 / 定位授权） -->
+    <div id="guide-modal" class="modal hidden">
+      <div class="modal-content">
+        <h3 id="guide-title">使用引导</h3>
+        <p id="guide-subtitle" class="muted"></p>
+        <div class="guide-tabs">
+          <button class="guide-tab active" data-os="android">🤖 安卓</button>
+          <button class="guide-tab" data-os="ios">🍎 iPhone</button>
+        </div>
+        <div id="guide-steps" class="guide-steps"></div>
+        <button id="btn-close-guide" class="btn btn-primary" style="width:100%;margin-top:16px">我知道了</button>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

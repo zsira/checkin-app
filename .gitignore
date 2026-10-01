@@ -1,0 +1,7 @@
+node_modules/
+checkin.db
+checkin.db-shm
+checkin.db-wal
+certs/
+*.log
+.trae-html-share-packages/

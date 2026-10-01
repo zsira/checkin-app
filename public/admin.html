@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>打卡管理后台</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    body { background: #f5f6fa; }
+    .admin-wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+    .admin-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+    .admin-header h1 { font-size: 22px; }
+    .admin-header a { color: var(--primary); text-decoration: none; font-size: 14px; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .stat-card { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
+    .stat-num { font-size: 28px; font-weight: 700; color: var(--primary); }
+    .stat-label { font-size: 13px; color: var(--muted); margin-top: 2px; }
+    .panel { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.05); margin-bottom: 24px; }
+    .panel h2 { font-size: 16px; margin-bottom: 12px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #f0f0f0; }
+    th { background: #fafafa; font-weight: 600; font-size: 13px; color: var(--muted); position: sticky; top: 0; }
+    tr:hover td { background: #fafbff; }
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 6px; background: var(--primary-light); color: var(--primary); font-size: 12px; font-weight: 600; }
+    .btn-del { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 13px; padding: 4px 8px; }
+    .addr-cell { max-width: 280px; font-size: 12px; color: var(--muted); word-break: break-all; }
+    .filter-row { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+    .filter-row input { padding: 8px 12px; border: 1.5px solid var(--border); border-radius: 8px; font-size: 14px; outline: none; }
+    .filter-row input:focus { border-color: var(--primary); }
+    .btn-export { background: var(--success); color: #fff; border: none; padding: 8px 16px; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 600; }
+    .btn-export:active { transform: scale(.97); }
+    .btn-logout { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; margin-left: 12px; }
+
+    /* 登录页 */
+    .login-wrap { max-width: 380px; margin: 80px auto; padding: 24px; }
+    .login-card { background: #fff; border-radius: 16px; padding: 32px; box-shadow: 0 4px 16px rgba(0,0,0,.08); }
+    .login-card h1 { text-align: center; margin-bottom: 8px; }
+    .login-card .muted { text-align: center; margin-bottom: 24px; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <!-- 登录页 -->
+  <div id="login-screen" class="login-wrap">
+    <div class="login-card">
+      <h1>🔐 管理后台登录</h1>
+      <p class="muted">请输入管理员密码</p>
+      <input id="login-password" class="input" type="password" placeholder="管理员密码" autocomplete="current-password">
+      <div id="login-error" style="color:var(--danger);font-size:13px;margin:8px 0;min-height:18px"></div>
+      <button id="btn-login" class="btn btn-primary">登录</button>
+      <p class="muted" style="margin-top:16px;font-size:12px">默认密码：admin123（可通过环境变量修改）</p>
+    </div>
+  </div>
+
+  <!-- 后台内容 -->
+  <div id="admin-content" class="admin-wrap hidden">
+    <div class="admin-header">
+      <h1>📋 打卡管理后台</h1>
+      <div>
+        <a href="index.html">← 返回打卡</a>
+        <button id="btn-logout" class="btn-logout">退出登录</button>
+      </div>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="panel">
+      <h2>👥 人员管理</h2>
+      <div class="filter-row">
+        <input id="filter-person" placeholder="搜索成员姓名" style="flex:1;min-width:200px">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>成员</th><th>打卡次数</th><th>参与群组</th><th>首次打卡</th><th>最近打卡</th><th>操作</th></tr></thead>
+          <tbody id="persons-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>所有群组</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>群组名</th><th>邀请码</th><th>打卡范围</th><th>打卡数</th><th>创建时间</th></tr></thead>
+          <tbody id="groups-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">打卡记录</h2>
+        <button id="btn-export" class="btn-export">📥 导出 Excel</button>
+      </div>
+      <div class="filter-row">
+        <input id="filter-group" placeholder="按群组筛选" style="width:140px">
+        <input id="filter-user" placeholder="按用户筛选" style="width:140px">
+        <input id="filter-keyword" placeholder="搜索地址">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>用户</th><th>群组</th><th>位置</th><th>操作</th></tr></thead>
+          <tbody id="checkins-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

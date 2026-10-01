@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: checkin-app
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: ADMIN_PASSWORD
+        value: admin123
+      - key: AMAP_KEY
+        value: ""
+      - key: TIANDITU_KEY
+        value: ""
