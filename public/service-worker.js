@@ -1,11 +1,13 @@
 // Service Worker - 让应用可安装到主屏幕并支持离线基本功能
-const CACHE = 'checkin-v3';
+const CACHE = 'checkin-v4';
 const ASSETS = [
   './',
   './index.html',
+  './admin.html',
   './app.js',
   './style.css',
   './manifest.json',
+  './manifest-admin.json',
   './icon-192.png',
   './icon-512.png',
 ];
