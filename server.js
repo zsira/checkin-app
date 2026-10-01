@@ -18,6 +18,13 @@ const proxyAgent = (process.env.HTTPS_PROXY || process.env.https_proxy)
   : null;
 
 app.use(express.json());
+
+// manifest.json 用正确的 content-type，确保 PWA 可安装
+app.get('/manifest.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.sendFile(path.join(__dirname, 'public', 'manifest.json'));
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- 数据库初始化 ----------
