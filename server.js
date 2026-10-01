@@ -5,6 +5,10 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const dns = require('dns');
+
+// 强制 IPv4 优先（部分云平台如 Railway 不支持 IPv6 出站）
+dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
