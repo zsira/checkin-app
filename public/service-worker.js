@@ -1,5 +1,5 @@
 // Service Worker - PWA 安装、离线缓存、Web Push、定时同步兜底推送
-const CACHE = 'checkin-v15';
+const CACHE = 'checkin-v18';
 const ASSETS = [
   './',
   './index.html',

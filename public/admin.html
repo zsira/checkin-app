@@ -100,6 +100,16 @@
       <div id="leaves-list"></div>
     </div>
 
+    <!-- 设备确认（新设备需管理员批准，防止冒名打卡/查记录） -->
+    <div class="panel" id="panel-devices" style="border-left:4px solid #4f46e5">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">📱 设备确认 <span id="device-badge" style="background:#4f46e5;color:#fff;border-radius:10px;padding:1px 9px;font-size:13px;vertical-align:middle">0</span></h2>
+        <button id="btn-devices-refresh" class="btn-export" style="background:var(--primary)">刷新</button>
+      </div>
+      <p class="muted" style="font-size:12.5px;margin:0 0 10px">成员首次使用的设备自动生效；同一成员在<b>新设备</b>上打开打卡时需在此核对批准。待确认设备仍可打卡，其记录会标注"待确认设备"，确认非本人设备请立即删除。</p>
+      <div id="devices-list"></div>
+    </div>
+
     <!-- 管理员管理（仅超管可见） -->
     <div class="panel" id="panel-admins" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -337,7 +347,7 @@
     </div>
   </div>
 
-  <script src="admin.js?v=20261002g"></script>
+  <script src="admin.js?v=20261002h"></script>
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('service-worker.js').catch(() => {});

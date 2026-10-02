@@ -33,6 +33,12 @@ let proxyAgent = null;
 
 app.set('trust proxy', 1); // 部署在 Render 等反向代理后，取真实客户端 IP 用于限流
 app.use(express.json());
+// 成员考勤数据及 X-Device-Status 等状态头均为实时私有数据，禁止浏览器/代理缓存
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
 
 // ---------- 简单内存限流（单实例足够，进程重启自动清零） ----------
 const rateBuckets = new Map();
@@ -184,6 +190,17 @@ async function initDb() {
       user_name TEXT,
       updated_at BIGINT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS member_devices (
+      id SERIAL PRIMARY KEY,
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      user_name TEXT NOT NULL,
+      token TEXT UNIQUE NOT NULL,
+      label TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at BIGINT NOT NULL,
+      last_seen BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_devices_member ON member_devices(group_id, user_name);
   `);
 
   // 兼容性：添加休息字段（如已存在则跳过）
@@ -212,6 +229,8 @@ async function initDb() {
   // 兼容性：补卡字段
   try { await pool.query('ALTER TABLE checkins ADD COLUMN is_makeup BOOLEAN DEFAULT false'); } catch {}
   try { await pool.query('ALTER TABLE checkins ADD COLUMN makeup_reason TEXT'); } catch {}
+  // 兼容性：打卡记录关联打卡设备（用于识别待确认设备的打卡）
+  try { await pool.query('ALTER TABLE checkins ADD COLUMN device_id INTEGER'); } catch {}
 
   // 初始化超级管理员
   const envPassword = process.env.ADMIN_PASSWORD;
@@ -818,8 +837,81 @@ app.patch('/api/groups/:code', (req, res, next) => {
   }
 });
 
+// ---------- 成员设备令牌（防冒名打卡/查记录） ----------
+// 员工首次以"姓名+群组"在某设备上使用时自动登记：首台设备直接生效，之后的新设备待管理员确认
+app.post('/api/member/register', async (req, res) => {
+  try {
+    const groupCode = String(req.body?.groupCode || '').trim();
+    const userName = String(req.body?.userName || '').trim();
+    const label = String(req.body?.label || '').slice(0, 120);
+    if (!groupCode || !userName) return res.status(400).json({ error: '缺少参数' });
+    if (userName.length > 20) return res.status(400).json({ error: '姓名过长' });
+    const grp = await pool.query('SELECT id, name FROM groups WHERE code = $1', [groupCode]);
+    if (grp.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const gid = grp.rows[0].id;
+
+    // 同一会话反复登记：已有设备令牌直接返回，不重复建设备
+    const existToken = req.headers['x-member-token'] || '';
+    if (existToken) {
+      const cur = await pool.query('SELECT * FROM member_devices WHERE token = $1 AND group_id = $2 AND user_name = $3',
+        [existToken, gid, userName]);
+      if (cur.rows[0]) {
+        return res.json({ token: cur.rows[0].token, status: cur.rows[0].status, device_id: cur.rows[0].id });
+      }
+    }
+
+    const cnt = await pool.query('SELECT COUNT(*)::int AS n FROM member_devices WHERE group_id = $1 AND user_name = $2', [gid, userName]);
+    if (cnt.rows[0].n >= 10) return res.status(400).json({ error: '该成员登记设备过多，请联系管理员清理旧设备' });
+
+    const status = cnt.rows[0].n === 0 ? 'active' : 'pending';
+    const token = crypto.randomBytes(24).toString('hex');
+    const ins = await pool.query(
+      `INSERT INTO member_devices (group_id, user_name, token, label, status, created_at, last_seen)
+       VALUES ($1,$2,$3,$4,$5,$6,$6) RETURNING id`,
+      [gid, userName, token, label || null, status, Date.now()]
+    );
+    if (status === 'pending') {
+      pushToAdmins({
+        title: '📱 新设备待确认',
+        body: `成员「${userName}」在群组「${grp.rows[0].name}」的新设备上使用打卡，请在后台"设备确认"中核对批准`,
+        tag: 'device-' + ins.rows[0].id,
+      }).catch(() => {});
+    }
+    res.json({ token, status, device_id: ins.rows[0].id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 成员令牌校验：令牌必须有效，且与请求中的群组、姓名一致
+function memberAuth(req, res, next) {
+  (async () => {
+    const token = req.headers['x-member-token'] || '';
+    if (!token) {
+      return res.status(401).json({ error: '设备未登记，请重新进入打卡页面', need_register: true });
+    }
+    const dev = await pool.query('SELECT * FROM member_devices WHERE token = $1', [token]);
+    if (dev.rows.length === 0) {
+      return res.status(401).json({ error: '设备登记已失效，请重新进入打卡页面', need_register: true });
+    }
+    const d = dev.rows[0];
+    const code = String(req.body?.groupCode || req.query.groupCode || req.params.code || '').trim();
+    const name = String(req.body?.userName ?? req.query.userName ?? req.query.user_name ?? '').trim();
+    const grp = await pool.query('SELECT id FROM groups WHERE code = $1', [code]);
+    if (grp.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    if (grp.rows[0].id !== d.group_id || (name && name !== d.user_name)) {
+      return res.status(403).json({ error: '设备与成员信息不匹配，请重新进入群组', need_register: true });
+    }
+    req.device = d;
+    // 每次请求回传设备审批状态，前端据此刷新"待确认"提示（审批通过/拒绝后无需刷新页面）
+    res.setHeader('X-Device-Status', d.status);
+    pool.query('UPDATE member_devices SET last_seen = $1 WHERE id = $2', [Date.now(), d.id]).catch(() => {});
+    next();
+  })().catch(e => res.status(500).json({ error: e.message }));
+}
+
 // ---------- 打卡 API ----------
-app.post('/api/checkins', async (req, res) => {
+app.post('/api/checkins', memberAuth, async (req, res) => {
   try {
     const { groupCode, userName, lat, lng, address, accuracy } = req.body || {};
     if (!groupCode || !userName) return res.status(400).json({ error: '缺少参数' });
@@ -875,9 +967,9 @@ app.post('/api/checkins', async (req, res) => {
       [g.id, userName.trim(), punchType, todayStart]
     );
     const info = await pool.query(
-      `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, punch_type, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-      [g.id, userName.trim(), lat ?? null, lng ?? null, displayAddr, accuracy ?? null, punchType, now()]
+      `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, punch_type, created_at, device_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+      [g.id, userName.trim(), lat ?? null, lng ?? null, displayAddr, accuracy ?? null, punchType, now(), req.device.id]
     );
     const checkin = await pool.query('SELECT * FROM checkins WHERE id = $1', [info.rows[0].id]);
     const lateInfo = punchLateOf(checkin.rows[0]);
@@ -888,6 +980,7 @@ app.post('/api/checkins', async (req, res) => {
       duplicated: dup.rows.length > 0,
       late: lateInfo.late,
       late_minutes: lateInfo.lateMinutes,
+      device_status: req.device.status,
     });
 
     // 后台异步获取详细地址
@@ -903,7 +996,7 @@ app.post('/api/checkins', async (req, res) => {
   }
 });
 
-app.get('/api/groups/:code/checkins', async (req, res) => {
+app.get('/api/groups/:code/checkins', memberAuth, async (req, res) => {
   try {
     // 员工端只能按姓名查询本人记录；不带姓名拒绝（不再返回全组数据）
     const userName = (req.query.user_name || '').trim();
@@ -922,7 +1015,7 @@ app.get('/api/groups/:code/checkins', async (req, res) => {
 
 // ---------- 请假 API ----------
 // 提交请假
-app.post('/api/leaves', async (req, res) => {
+app.post('/api/leaves', memberAuth, async (req, res) => {
   try {
     const { groupCode, userName, start_ts, end_ts, reason } = req.body || {};
     if (!groupCode || !userName || !start_ts || !end_ts) {
@@ -953,7 +1046,7 @@ app.post('/api/leaves', async (req, res) => {
 });
 
 // 查询自己的请假记录
-app.get('/api/leaves', async (req, res) => {
+app.get('/api/leaves', memberAuth, async (req, res) => {
   try {
     const { groupCode, userName } = req.query;
     if (!groupCode || !userName) return res.status(400).json({ error: '缺少参数' });
@@ -970,7 +1063,7 @@ app.get('/api/leaves', async (req, res) => {
 });
 
 // 删除自己的请假（取消请假）：必须同时提供本人姓名与所在群组邀请码，且记录确实属于该群该人
-app.delete('/api/leaves/:id', async (req, res) => {
+app.delete('/api/leaves/:id', memberAuth, async (req, res) => {
   try {
     const { userName, groupCode } = req.query;
     const id = parseInt(req.params.id);
@@ -1239,11 +1332,83 @@ app.delete('/api/admin/leaves/:id', auth, async (req, res) => {
   }
 });
 
+// ---------- 成员设备管理 ----------
+app.get('/api/admin/devices', auth, async (req, res) => {
+  try {
+    const rows = await pool.query(
+      `SELECT d.*, g.name AS group_name, g.code AS group_code
+       FROM member_devices d JOIN groups g ON g.id = d.group_id
+       ORDER BY (d.status = 'pending') DESC, d.last_seen DESC`
+    );
+    res.json(rows.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/admin/devices/:id/approve', auth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      "UPDATE member_devices SET status = 'active' WHERE id = $1 RETURNING *",
+      [parseInt(req.params.id)]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: '设备不存在' });
+    const d = r.rows[0];
+    const grp = await pool.query('SELECT code FROM groups WHERE id = $1', [d.group_id]);
+    if (grp.rows[0]) {
+      pushToUser(grp.rows[0].code, d.user_name, {
+        title: '📱 设备已确认',
+        body: `管理员已确认你的打卡设备，可正常使用全部考勤功能`,
+        tag: 'device-ok-' + d.id,
+      }).catch(() => {});
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/admin/devices/:id', auth, async (req, res) => {
+  try {
+    const r = await pool.query('DELETE FROM member_devices WHERE id = $1 RETURNING *', [parseInt(req.params.id)]);
+    if (r.rows.length === 0) return res.status(404).json({ error: '设备不存在' });
+    const d = r.rows[0];
+    const grp = await pool.query('SELECT code FROM groups WHERE id = $1', [d.group_id]);
+    if (grp.rows[0]) {
+      pushToUser(grp.rows[0].code, d.user_name, {
+        title: '📱 打卡设备未获确认',
+        body: `你的一台打卡设备未被管理员确认，如为本人操作请重新进入打卡页面并联系管理员`,
+        tag: 'device-no-' + d.id,
+      }).catch(() => {});
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 重置某成员的全部设备（被盗用/冒名注册后恢复用），该成员下次进入需重新登记
+app.post('/api/admin/devices/reset', auth, async (req, res) => {
+  try {
+    const { group_code, user_name } = req.body || {};
+    if (!group_code || !user_name) return res.status(400).json({ error: '缺少参数' });
+    const grp = await pool.query('SELECT id FROM groups WHERE code = $1', [String(group_code).trim()]);
+    if (grp.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    await pool.query('DELETE FROM member_devices WHERE group_id = $1 AND user_name = $2',
+      [grp.rows[0].id, String(user_name).trim()]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/admin/checkins', auth, async (req, res) => {
   try {
     const rows = await pool.query(
-      `SELECT c.*, g.code AS group_code, g.name AS group_name
-       FROM checkins c JOIN groups g ON c.group_id = g.id
+      `SELECT c.*, g.code AS group_code, g.name AS group_name, md.status AS device_status
+       FROM checkins c
+       JOIN groups g ON c.group_id = g.id
+       LEFT JOIN member_devices md ON md.id = c.device_id
        ORDER BY c.created_at DESC LIMIT 500`
     );
     res.json(rows.rows);
@@ -1258,8 +1423,10 @@ app.get('/api/admin/persons/checkins', auth, async (req, res) => {
     const { code, user } = req.query;
     if (!code || !user) return res.status(400).json({ error: '缺少参数' });
     const rows = await pool.query(
-      `SELECT c.*, g.code AS group_code, g.name AS group_name
-       FROM checkins c JOIN groups g ON c.group_id = g.id
+      `SELECT c.*, g.code AS group_code, g.name AS group_name, md.status AS device_status
+       FROM checkins c
+       JOIN groups g ON c.group_id = g.id
+       LEFT JOIN member_devices md ON md.id = c.device_id
        WHERE g.code = $1 AND c.user_name = $2
        ORDER BY c.created_at DESC`,
       [code, user]

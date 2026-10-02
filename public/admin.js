@@ -8,6 +8,7 @@ let allCheckins = [];
 let allGroups = [];
 let memberStats = [];
 let allLeaves = [];
+let allDevices = [];
 let currentAdmin = null; // { username, is_super }
 let refreshTimer = null;
 let editing = null; // { type: 'group'|'checkin', id, data }
@@ -69,6 +70,7 @@ function init() {
   $('btn-logout').onclick = logout;
   $('btn-admin-push').onclick = enableAdminPush;
   $('btn-export').onclick = doExport;
+  $('btn-devices-refresh').onclick = loadAll;
   $('modal-cancel').onclick = closeModal;
   $('modal-save').onclick = saveEdit;
 
@@ -281,21 +283,24 @@ function logout() {
 // ---------- 数据加载 ----------
 async function loadAll() {
   try {
-    const [gRes, cRes, sRes, meRes, lRes] = await Promise.all([
+    const [gRes, cRes, sRes, meRes, lRes, dRes] = await Promise.all([
       fetch('/api/admin/groups', { headers: authHeaders() }),
       fetch('/api/admin/checkins', { headers: authHeaders() }),
       fetch('/api/admin/stats/members', { headers: authHeaders() }),
       fetch('/api/admin/me', { headers: authHeaders() }),
       fetch('/api/admin/leaves', { headers: authHeaders() }),
+      fetch('/api/admin/devices', { headers: authHeaders() }),
     ]);
-    if (gRes.status === 401 || cRes.status === 401 || meRes.status === 401) { logout(); return false; }
+    if (gRes.status === 401 || cRes.status === 401 || meRes.status === 401 || dRes.status === 401) { logout(); return false; }
     allGroups = await gRes.json();
     allCheckins = await cRes.json();
     memberStats = sRes.ok ? await sRes.json() : [];
     allLeaves = lRes.ok ? await lRes.json() : [];
+    allDevices = dRes.ok ? await dRes.json() : [];
     if (meRes.ok) currentAdmin = await meRes.json();
     renderStats();
     renderLeaves();
+    renderDevices();
     renderGroups();
     renderPersons();
     // 超管专属：管理员管理（普通管理员完全不可见，且不会发起请求）
@@ -353,6 +358,112 @@ async function delLeave(id) {
   if (!confirm('确定删除该请假记录？删除后对应日期可能计入缺卡。')) return;
   await fetch('/api/admin/leaves/' + id, { method: 'DELETE', headers: authHeaders() });
   loadAll();
+}
+
+// ---------- 成员设备审批 ----------
+function renderDevices() {
+  const box = $('devices-list');
+  if (!box) return;
+  const pending = allDevices.filter(d => d.status === 'pending');
+  const active = allDevices.filter(d => d.status !== 'pending');
+  const badge = $('device-badge');
+  if (badge) {
+    badge.textContent = pending.length;
+    badge.style.background = pending.length ? '#e53935' : '#4f46e5';
+  }
+  if (!allDevices.length) {
+    box.innerHTML = '<div style="color:var(--muted);text-align:center;padding:16px">暂无设备登记记录</div>';
+    return;
+  }
+  const row = (d, isPending) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid #f0f0f0;flex-wrap:wrap;${isPending ? 'background:#fff8e1;border-radius:10px;padding-left:10px;padding-right:10px;margin-bottom:6px' : ''}">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:14px">
+          <b>${esc(d.user_name)}</b>
+          <span class="tag" style="margin:0 6px">${esc(d.group_name)}（${esc(d.group_code)}）</span>
+          ${isPending
+            ? '<span style="background:#ffe0b2;color:#e65100;padding:2px 9px;border-radius:10px;font-size:12px;font-weight:700">⏳ 待确认</span>'
+            : '<span style="background:#e8f5e9;color:#2e7d32;padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600">✓ 已确认</span>'}
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px;word-break:break-all">
+          📟 ${esc(d.label || '未知设备')}
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">
+          登记：${fmtTime(d.created_at)}　最近使用：${fmtTime(d.last_seen)}
+        </div>
+      </div>
+      <div class="device-actions" style="display:flex;gap:6px;flex-wrap:wrap">
+        ${isPending ? `<button class="btn-export" style="background:var(--success);padding:6px 14px" onclick="approveDevice(${d.id})">✓ 批准</button>` : ''}
+        <button class="btn-del" style="border:1px solid #ffcdd2;border-radius:8px;padding:6px 12px" onclick="removeDevice(${d.id},'${esc(d.user_name).replace(/'/g, "\\'")}')">🗑️ 删除</button>
+      </div>
+    </div>`;
+  let html = '';
+  if (pending.length) {
+    html += `<div style="font-size:13px;font-weight:700;color:#e65100;margin-bottom:6px">⏳ 待确认（${pending.length}）</div>`;
+    html += pending.map(d => row(d, true)).join('');
+  }
+  if (active.length) {
+    // 同一成员的"重置全部设备"按钮只在其第一条设备行显示
+    const seenMember = new Set();
+    const activeHtml = active.map(d => {
+      const key = d.group_code + '|' + d.user_name;
+      const first = !seenMember.has(key);
+      seenMember.add(key);
+      const tmp = document.createElement('div');
+      tmp.innerHTML = row(d, false);
+      if (first) {
+        const actions = tmp.querySelector('.device-actions');
+        const btn = document.createElement('button');
+        btn.className = 'btn-edit';
+        btn.style.cssText = 'border:1px solid #c5cae9;border-radius:8px;padding:6px 12px;color:#3949ab;font-size:12px';
+        const safeName = esc(d.user_name).replace(/'/g, "\\'");
+        const safeCode = esc(d.group_code).replace(/'/g, "\\'");
+        btn.textContent = '♻️ 重置该成员';
+        btn.onclick = () => resetMemberDevices(safeCode, safeName);
+        actions.insertBefore(btn, actions.firstChild);
+      }
+      return tmp.innerHTML;
+    }).join('');
+    html += `<details style="margin-top:10px" ${pending.length ? '' : 'open'}>
+      <summary style="font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;padding:6px 0">✓ 已确认设备（${active.length}，点击展开/折叠；手机丢失或被冒名时可重置成员设备）</summary>
+      <div style="margin-top:4px">${activeHtml}</div>
+    </details>`;
+  }
+  box.innerHTML = html;
+}
+
+async function approveDevice(id) {
+  try {
+    const res = await fetch('/api/admin/devices/' + id + '/approve', { method: 'POST', headers: authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(data.error || '操作失败'); return; }
+    loadAll();
+  } catch (e) { alert('网络错误'); }
+}
+
+async function removeDevice(id, userName) {
+  if (!confirm(`确定删除「${userName}」的这台设备？\n删除后该设备需重新登记，非本人设备请放心删除。`)) return;
+  try {
+    const res = await fetch('/api/admin/devices/' + id, { method: 'DELETE', headers: authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(data.error || '删除失败'); return; }
+    loadAll();
+  } catch (e) { alert('网络错误'); }
+}
+
+async function resetMemberDevices(code, userName) {
+  if (!confirm(`确定重置「${userName}」在群组 ${code} 的全部设备？\n该成员所有已登记设备立即失效，再次打开打卡页面时需重新登记（首台重新自动生效）。\n适用于手机丢失、被他人冒名登记等情况。`)) return;
+  try {
+    const res = await fetch('/api/admin/devices/reset', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_code: code, user_name: userName }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(data.error || '重置失败'); return; }
+    alert('已重置，该成员下次进入时需重新登记设备');
+    loadAll();
+  } catch (e) { alert('网络错误'); }
 }
 
 function renderGroups() {
@@ -550,6 +661,9 @@ function renderPersonRecords(rows) {
       const makeupTag = r.is_makeup
         ? `<span style="background:#e0f7fa;color:#0277bd;border:1px solid #80deea;border-radius:6px;padding:0 6px;font-size:12px;margin-left:6px;font-weight:600">🔧 补卡·正常</span>`
         : '';
+      const devTag = r.device_status === 'pending'
+        ? `<span style="background:#fff3e0;color:#e65100;border:1px solid #ffcc80;border-radius:6px;padding:0 6px;font-size:12px;margin-left:6px;font-weight:600">📱 待确认设备</span>`
+        : '';
       const loc = r.is_makeup
         ? `<span style="color:var(--muted)">管理员补卡${r.makeup_reason ? ' · ' + esc(r.makeup_reason) : ''}</span>`
         : (r.lat != null ? `<a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank" style="color:var(--primary)">${r.address ? esc(r.address) : '📍 地图位置'}</a>` : '');
@@ -557,7 +671,7 @@ function renderPersonRecords(rows) {
         <div style="display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #f5f5f5">
           <div style="width:56px;font-weight:600;font-size:13px;color:${lateInfo.late ? '#e65100' : 'var(--primary)'}">${s.icon} ${hm}</div>
           <div style="flex:1;min-width:0">
-            <div style="font-size:13px">${s.name}${lateTag}${makeupTag}</div>
+            <div style="font-size:13px">${s.name}${lateTag}${makeupTag}${devTag}</div>
             <div style="font-size:12px;color:var(--muted)">${loc}${r.accuracy ? ` · 精度${Math.round(r.accuracy)}m` : ''}</div>
           </div>
           <button class="btn-del" onclick="delCheckinRefresh(${r.id})">删除</button>

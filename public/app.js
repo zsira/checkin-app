@@ -22,6 +22,112 @@ function requirePrivacyConsent() {
   return false;
 }
 
+// ---------- 成员设备令牌（防他人冒名打卡/查记录） ----------
+function deviceStoreKey() { return 'ci_dev_' + state.groupCode; }
+function readDevice() {
+  try { return JSON.parse(localStorage.getItem(deviceStoreKey()) || 'null'); } catch { return null; }
+}
+function saveDevice(d) { localStorage.setItem(deviceStoreKey(), JSON.stringify(d)); }
+function clearAllDevices() {
+  Object.keys(localStorage).filter(k => k.startsWith('ci_dev_')).forEach(k => localStorage.removeItem(k));
+}
+function deviceLabel() {
+  const ua = navigator.userAgent || '';
+  const kind = /iPhone|iPad|iPod/i.test(ua) ? '苹果设备' : (/Android/i.test(ua) ? '安卓设备' : '浏览器');
+  return kind + ' · ' + ua.slice(-50);
+}
+// 进行中的登记请求：进群瞬间记录/请假等多个请求会并发触发首次登记，
+// 必须共用同一个 Promise，否则同一设备会被重复登记成多台"待确认"设备
+let registerInflight = null;
+let registerInflightKey = '';
+// 首次进入群组时自动登记本设备：第一台直接生效，之后的新设备需管理员确认
+async function ensureDeviceToken() {
+  if (!state.groupCode || !state.userName) throw new Error('请先加入群组');
+  const existing = readDevice();
+  if (existing && existing.token) return existing;
+  const key = state.groupCode + '|' + state.userName;
+  if (registerInflight && registerInflightKey === key) return registerInflight;
+  registerInflightKey = key;
+  registerInflight = (async () => {
+    try {
+      const res = await fetch('/api/member/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ groupCode: state.groupCode, userName: state.userName, label: deviceLabel() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '设备登记失败');
+      const d = { token: data.token, status: data.status, deviceId: data.device_id };
+      saveDevice(d);
+      if (data.status === 'pending') toast('📱 此设备待管理员确认，期间可正常打卡');
+      return d;
+    } finally {
+      registerInflight = null;
+      registerInflightKey = '';
+    }
+  })();
+  return registerInflight;
+}
+// 携带设备令牌的请求；401/403 且要求重新登记时，自动重新登记并重试一次
+async function memberFetch(url, opts = {}) {
+  let d;
+  try { d = await ensureDeviceToken(); } catch (e) { return { registerError: e }; }
+  opts.headers = { ...(opts.headers || {}), 'X-Member-Token': d.token };
+  let res = await fetch(url, opts);
+  if (res.status === 401 || res.status === 403) {
+    const body = await res.clone().json().catch(() => ({}));
+    if (body.need_register) {
+      localStorage.removeItem(deviceStoreKey());
+      try {
+        d = await ensureDeviceToken();
+      } catch (e) { return { registerError: e }; }
+      opts.headers = { ...(opts.headers || {}), 'X-Member-Token': d.token };
+      res = await fetch(url, opts);
+    }
+  }
+  // 用响应头同步设备审批状态，刷新待确认横幅
+  const remoteStatus = res.headers.get('x-device-status');
+  if (remoteStatus) {
+    const cur = readDevice();
+    if (cur && cur.status !== remoteStatus) {
+      cur.status = remoteStatus;
+      saveDevice(cur);
+      if (remoteStatus === 'active') toast('📱 设备已通过管理员确认');
+    }
+    updateDeviceBanner();
+  }
+  return { res, device: readDevice() };
+}
+
+// ---------- 设备待确认横幅 ----------
+function updateDeviceBanner() {
+  const el = $('device-notice');
+  if (!el) return;
+  const d = readDevice();
+  if (d && d.status === 'pending') {
+    el.textContent = '📱 此设备待管理员确认，期间可正常打卡；请提醒管理员尽快在后台"设备确认"中核对';
+    el.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+  }
+}
+// 推送：设备已被管理员确认
+function markDeviceActive() {
+  const d = readDevice();
+  if (d && d.status !== 'active') {
+    d.status = 'active';
+    saveDevice(d);
+    toast('📱 设备已通过管理员确认');
+  }
+  updateDeviceBanner();
+}
+// 推送：设备被管理员删除（未获确认），清除本地令牌，下次请求自动重新登记
+function handleDeviceRevoked() {
+  localStorage.removeItem(deviceStoreKey());
+  updateDeviceBanner();
+  toast('📱 本设备未获管理员确认，请重新进入页面并联系管理员');
+}
+
 // ---------- 四个固定打卡时段 ----------
 // 0=早上上班卡 07:30，1=中午下班卡 12:00，2=下午上班卡 13:30，3=下午下班卡 18:00
 const PUNCH_SLOTS = [
@@ -173,13 +279,17 @@ function init() {
       if (e.data && e.data.type === 'server-push') {
         const p = e.data.payload || {};
         if (p.tag) shownTags.add(p.tag);
-        toast(p.title || '新通知');
-        if ((p.tag || '').startsWith('makeup-')) {
+        const tag = p.tag || '';
+        // 设备审批类通知不重复弹通用 toast，由处理函数给出针对性提示
+        if (tag.startsWith('device-ok-')) { markDeviceActive(); }
+        else if (tag.startsWith('device-no-')) { handleDeviceRevoked(); }
+        else { toast(p.title || '新通知'); }
+        if (tag.startsWith('makeup-')) {
           const id = Number(String(p.tag).replace('makeup-', ''));
           if (id) notifiedMakeupIds.add(id);
           loadRecords();
         }
-        if ((p.tag || '').startsWith('rest-')) loadGroupSettings();
+        if (tag.startsWith('rest-')) loadGroupSettings();
       }
     });
   }
@@ -264,6 +374,8 @@ function bindEvents() {
 
   $('btn-change-name').onclick = () => {
     localStorage.removeItem('ci_name');
+    // 设备令牌与姓名绑定，切换姓名后旧令牌全部失效，清除以便以新身份重新登记
+    clearAllDevices();
     state.userName = '';
     showView('setup');
   };
@@ -348,6 +460,9 @@ function enterGroup(code, name) {
   showView('main');
   updateCurrentPunch();
   updatePushButton();
+  updateDeviceBanner();
+  // 提前登记本设备（首台直接生效，新设备推送管理员确认），不必等到首次打卡
+  ensureDeviceToken().then(() => updateDeviceBanner()).catch(() => {});
   syncPushSubscription();
   registerSyncFallback('user').then(() => establishEventBaseline());
   loadRecords();
@@ -431,6 +546,8 @@ function leaveGroup() {
   state.groupName = '';
   localStorage.removeItem('ci_group');
   localStorage.removeItem('ci_group_name');
+  const banner = $('device-notice');
+  if (banner) banner.classList.add('hidden');
   showGroupView();
 }
 
@@ -471,7 +588,7 @@ async function doCheckin() {
   }
 
   try {
-    const res = await fetch('/api/checkins', {
+    const mf = await memberFetch('/api/checkins', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -483,23 +600,27 @@ async function doCheckin() {
         accuracy: pos.coords.accuracy,
       }),
     });
+    if (mf.registerError) throw mf.registerError;
+    const res = mf.res;
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     status.className = 'location-status success';
     status.style.color = '';
     const punchName = data.punch_name || '';
+    const pendingSuffix = data.device_status === 'pending' ? '（设备待管理员确认）' : '';
     if (data.duplicated) {
-      status.textContent = `✓ ${punchName}已打过卡（重复记录）${data.late ? `，迟到${data.late_minutes}分钟` : ''}`;
+      status.textContent = `✓ ${punchName}已打过卡（重复记录）${data.late ? `，迟到${data.late_minutes}分钟` : ''}${pendingSuffix}`;
       toast(`${punchName}今天已打过卡`);
     } else if (data.late) {
       status.className = 'location-status';
       status.style.color = '#e65100';
-      status.textContent = `⚠️ ${punchName}打卡成功，迟到 ${data.late_minutes} 分钟`;
+      status.textContent = `⚠️ ${punchName}打卡成功，迟到 ${data.late_minutes} 分钟${pendingSuffix}`;
       toast(`${punchName}迟到 ${data.late_minutes} 分钟 ⚠️`);
     } else {
-      status.textContent = `✓ ${punchName} 打卡成功！`;
+      status.textContent = `✓ ${punchName} 打卡成功！${pendingSuffix}`;
       toast(`${punchName}打卡成功 🎉`);
     }
+    updateDeviceBanner();
     loadRecords();
   } catch (e) {
     status.className = 'location-status error';
@@ -595,8 +716,10 @@ let myRecords = [];
 async function loadRecords() {
   if (!state.groupCode) return;
   try {
-    // 仅获取当前用户自己的打卡记录
-    const res = await fetch('/api/groups/' + encodeURIComponent(state.groupCode) + '/checkins?user_name=' + encodeURIComponent(state.userName));
+    // 仅获取当前用户自己的打卡记录（需设备令牌）
+    const mf = await memberFetch('/api/groups/' + encodeURIComponent(state.groupCode) + '/checkins?user_name=' + encodeURIComponent(state.userName));
+    if (mf.registerError) { console.error(mf.registerError); return; }
+    const res = mf.res;
     const rows = await res.json();
     if (!res.ok) throw new Error(rows.error);
     myRecords = rows;
@@ -886,7 +1009,13 @@ async function pollPendingForeground() {
       const tag = ev.tag || ('e' + ev.id);
       if (!shownTags.has(tag)) {
         shownTags.add(tag);
-        toast(ev.title || '新通知');
+        if (tag.startsWith('device-ok-')) {
+          markDeviceActive();
+        } else if (tag.startsWith('device-no-')) {
+          handleDeviceRevoked();
+        } else {
+          toast(ev.title || '新通知');
+        }
         if (tag.startsWith('makeup-')) {
           const id = Number(tag.slice(7));
           if (id) notifiedMakeupIds.add(id);
@@ -1116,12 +1245,13 @@ async function submitLeave() {
     if (endTs <= startTs) { alert('结束时间必须晚于开始时间'); return; }
   }
   try {
-    const res = await fetch('/api/leaves', {
+    const mf = await memberFetch('/api/leaves', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groupCode: state.groupCode, userName: state.userName, start_ts: startTs, end_ts: endTs, reason }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
+    if (mf.registerError) throw mf.registerError;
+    const data = await mf.res.json();
+    if (!mf.res.ok) throw new Error(data.error);
     $('leave-modal').classList.add('hidden');
     toast('请假申请已提交 📝');
     loadLeaves();
@@ -1134,9 +1264,10 @@ async function loadLeaves() {
   const box = $('leave-status');
   if (!box) return;
   try {
-    const res = await fetch('/api/leaves?groupCode=' + encodeURIComponent(state.groupCode) + '&userName=' + encodeURIComponent(state.userName));
-    const rows = await res.json();
-    if (!res.ok) return;
+    const mf = await memberFetch('/api/leaves?groupCode=' + encodeURIComponent(state.groupCode) + '&userName=' + encodeURIComponent(state.userName));
+    if (mf.registerError) return;
+    const rows = await mf.res.json();
+    if (!mf.res.ok) return;
     const now = Date.now();
     const active = rows.filter(r => Number(r.end_ts) > now);
     if (!active.length) { box.innerHTML = ''; return; }
