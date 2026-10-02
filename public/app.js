@@ -30,6 +30,16 @@ function punchSlotOf(r) {
   if (r.punch_type != null) return Number(r.punch_type);
   return currentPunchSlot(new Date(Number(r.created_at)));
 }
+// 上班卡标准时间：0=07:30，2=13:30；提前或延后10分钟内正常，超过记迟到
+const WORK_ON_STANDARD = { 0: 7 * 60 + 30, 2: 13 * 60 + 30 };
+function punchLateOf(r) {
+  const slot = punchSlotOf(r);
+  const standard = WORK_ON_STANDARD[slot];
+  if (standard === undefined) return { late: false, lateMinutes: 0 };
+  const d = new Date(Number(r.created_at));
+  const diff = d.getHours() * 60 + d.getMinutes() - standard;
+  return diff > 10 ? { late: true, lateMinutes: diff } : { late: false, lateMinutes: 0 };
+}
 function todayKey() {
   const d = new Date();
   return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
@@ -421,10 +431,16 @@ async function doCheckin() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     status.className = 'location-status success';
+    status.style.color = '';
     const punchName = data.punch_name || '';
     if (data.duplicated) {
-      status.textContent = `✓ ${punchName}已打过卡（重复记录）`;
+      status.textContent = `✓ ${punchName}已打过卡（重复记录）${data.late ? `，迟到${data.late_minutes}分钟` : ''}`;
       toast(`${punchName}今天已打过卡`);
+    } else if (data.late) {
+      status.className = 'location-status';
+      status.style.color = '#e65100';
+      status.textContent = `⚠️ ${punchName}打卡成功，迟到 ${data.late_minutes} 分钟`;
+      toast(`${punchName}迟到 ${data.late_minutes} 分钟 ⚠️`);
     } else {
       status.textContent = `✓ ${punchName} 打卡成功！`;
       toast(`${punchName}打卡成功 🎉`);
@@ -553,15 +569,23 @@ function renderPunchProgress(rows) {
   if (!box) return;
   const tk = todayKey();
   const done = new Set();
+  const late = new Set();
   rows.forEach(r => {
-    if (dayKeyOf(r.created_at) === tk) done.add(punchSlotOf(r));
+    if (dayKeyOf(r.created_at) === tk) {
+      done.add(punchSlotOf(r));
+      if (punchLateOf(r).late) late.add(punchSlotOf(r));
+    }
   });
   box.innerHTML = PUNCH_SLOTS.map(s => {
     const ok = done.has(s.type);
-    return `<div style="flex:1;text-align:center;padding:8px 2px;border-radius:10px;font-size:12px;
-      background:${ok ? '#e8f5e9' : '#f5f5f5'};color:${ok ? '#2e7d32' : '#999'};border:1px solid ${ok ? '#a5d6a7' : '#eee'}">
-      <div style="font-size:16px">${ok ? '✅' : s.icon}</div>
-      <div style="margin-top:2px;font-weight:600">${s.short}</div>
+    const isLate = late.has(s.type);
+    const bg = isLate ? '#fff3e0' : (ok ? '#e8f5e9' : '#f5f5f5');
+    const fg = isLate ? '#e65100' : (ok ? '#2e7d32' : '#999');
+    const bd = isLate ? '#ffcc80' : (ok ? '#a5d6a7' : '#eee');
+    const icon = isLate ? '⚠️' : (ok ? '✅' : s.icon);
+    return `<div style="flex:1;text-align:center;padding:8px 2px;border-radius:10px;font-size:12px;background:${bg};color:${fg};border:1px solid ${bd}">
+      <div style="font-size:16px">${icon}</div>
+      <div style="margin-top:2px;font-weight:600">${s.short}${isLate ? '<br>迟到' : ''}</div>
       <div>${s.time}</div>
     </div>`;
   }).join('');
@@ -577,7 +601,11 @@ function renderRecords(rows) {
     const initial = (r.user_name || '?').charAt(0).toUpperCase();
     const time = new Date(Number(r.created_at)).toLocaleString('zh-CN');
     const slot = PUNCH_SLOTS[punchSlotOf(r)];
+    const lateInfo = punchLateOf(r);
     const slotTag = `<span style="display:inline-block;background:#eef2ff;color:#4f46e5;border-radius:8px;padding:1px 7px;font-size:12px;margin-right:6px">${slot.icon} ${slot.name}</span>`;
+    const lateTag = lateInfo.late
+      ? `<span style="display:inline-block;background:#fff3e0;color:#e65100;border:1px solid #ffcc80;border-radius:8px;padding:0 7px;font-size:12px;margin-right:6px;font-weight:600">⚠️ 迟到${lateInfo.lateMinutes}分钟</span>`
+      : '';
     const addr = r.address
       ? `<div class="record-addr">📍 ${escapeHtml(r.address)}</div>`
       : (r.lat != null ? `<div class="record-addr"><a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank">📍 ${r.lat.toFixed(5)}, ${r.lng.toFixed(5)}</a></div>` : '');
@@ -585,7 +613,7 @@ function renderRecords(rows) {
       <div class="record-item">
         <div class="record-avatar">${escapeHtml(initial)}</div>
         <div class="record-body">
-          <div class="record-user">${slotTag}${escapeHtml(r.user_name)}</div>
+          <div class="record-user">${slotTag}${lateTag}${escapeHtml(r.user_name)}</div>
           <div class="record-time">${time}</div>
           ${addr}
         </div>

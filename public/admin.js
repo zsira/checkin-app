@@ -32,6 +32,16 @@ function dayKeyOf(ts) {
   const d = new Date(Number(ts));
   return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
 }
+// 上班卡迟到判定：0=07:30，2=13:30；延后超过10分钟记迟到
+const WORK_ON_STANDARD = { 0: 7 * 60 + 30, 2: 13 * 60 + 30 };
+function punchLateOf(r) {
+  const slot = punchSlotOf(r);
+  const standard = WORK_ON_STANDARD[slot];
+  if (standard === undefined) return { late: false, lateMinutes: 0 };
+  const d = new Date(Number(r.created_at));
+  const diff = d.getHours() * 60 + d.getMinutes() - standard;
+  return diff > 10 ? { late: true, lateMinutes: diff } : { late: false, lateMinutes: 0 };
+}
 
 // ---------- 初始化 ----------
 function init() {
@@ -261,17 +271,22 @@ function renderGroups() {
 
 function todayDots(p) {
   const done = new Set(p.today_slots || []);
+  const late = new Set(p.today_late || []);
   return PUNCH_SLOTS.map(s => {
     const ok = done.has(s.type);
-    return `<span title="${s.name} ${s.time}" style="display:inline-block;min-width:20px;text-align:center;font-size:13px;opacity:${ok ? '1' : '0.3'}">${ok ? '✅' : s.icon}</span>`;
+    const isLate = late.has(s.type);
+    const icon = isLate ? '⚠️' : (ok ? '✅' : s.icon);
+    return `<span title="${s.name} ${s.time}${isLate ? ' 迟到' : ''}" style="display:inline-block;min-width:20px;text-align:center;font-size:13px;opacity:${ok ? '1' : '0.3'}">${icon}</span>`;
   }).join('');
 }
 
 function statusBadge(p) {
   if (p.on_leave_today) return '<span style="background:#fff3e0;color:#e65100;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600">📝 请假中</span>';
   const n = (p.today_slots || []).length;
-  if (n >= 4) return '<span style="background:#e8f5e9;color:#2e7d32;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600">✓ 今日已满卡</span>';
-  if (n > 0) return `<span style="background:#eef2ff;color:#4f46e5;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600">今日已打${n}/4</span>`;
+  const lateToday = (p.today_late || []).length;
+  const lateTag = lateToday ? ` <span style="background:#fff3e0;color:#e65100;padding:3px 8px;border-radius:10px;font-size:12px;font-weight:600">迟到${lateToday}次</span>` : '';
+  if (n >= 4) return '<span style="background:#e8f5e9;color:#2e7d32;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600">✓ 今日已满卡</span>' + lateTag;
+  if (n > 0) return `<span style="background:#eef2ff;color:#4f46e5;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600">今日已打${n}/4</span>` + lateTag;
   return '<span style="background:#f5f5f5;color:#999;padding:3px 10px;border-radius:10px;font-size:12px">今日未打卡</span>';
 }
 
@@ -311,6 +326,7 @@ function renderPersons() {
           <td><b style="color:#4f46e5">${p.full_days || 0} 天</b></td>
           <td><b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days} 天</b></td>
           <td style="color:#e67e22">${p.leave_days || 0} 天</td>
+          <td><b style="color:${p.late_count > 0 ? '#e65100' : 'var(--success)'}">${p.late_count || 0} 次</b></td>
           <td>${p.total_checkins} 次</td>
           <td style="white-space:nowrap">
             <button class="btn-edit" onclick="openPerson(${args})">📋 记录</button>
@@ -325,7 +341,7 @@ function renderPersons() {
           <table>
             <thead><tr>
               <th>人员</th><th>今日打卡</th><th>打卡天数</th><th>完整卡天数</th>
-              <th>缺卡天数</th><th>请假天数</th><th>总计</th><th>操作</th>
+              <th>缺卡天数</th><th>请假天数</th><th>迟到次数</th><th>总计</th><th>操作</th>
             </tr></thead>
             <tbody>${rows}</tbody>
           </table>
@@ -348,15 +364,22 @@ async function openPerson(code, user) {
     `完整卡 <b style="color:#4f46e5">${p.full_days || 0}</b> 天`,
     `缺卡 <b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days}</b> 天`,
     `请假 <b style="color:#e67e22">${p.leave_days || 0}</b> 天`,
+    `迟到 <b style="color:${p.late_count > 0 ? '#e65100' : 'var(--success)'}">${p.late_count || 0}</b> 次`,
     `共 <b>${p.total_checkins}</b> 次`,
   ].map(t => `<span style="background:#f7f8fa;border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:13px">${t}</span>`).join('') : '';
   // 今日四卡种
   const done = new Set(p ? (p.today_slots || []) : []);
+  const todayLate = new Set(p ? (p.today_late || []) : []);
   $('person-modal-today').innerHTML = PUNCH_SLOTS.map(s => {
     const ok = done.has(s.type);
-    return `<div style="flex:1;text-align:center;padding:8px 2px;border-radius:10px;font-size:12px;background:${ok ? '#e8f5e9' : '#f5f5f5'};color:${ok ? '#2e7d32' : '#999'};border:1px solid ${ok ? '#a5d6a7' : '#eee'}">
-      <div style="font-size:16px">${ok ? '✅' : s.icon}</div>
-      <div style="margin-top:2px;font-weight:600">${s.short}</div><div>${s.time}</div>
+    const isLate = todayLate.has(s.type);
+    const bg = isLate ? '#fff3e0' : (ok ? '#e8f5e9' : '#f5f5f5');
+    const fg = isLate ? '#e65100' : (ok ? '#2e7d32' : '#999');
+    const bd = isLate ? '#ffcc80' : (ok ? '#a5d6a7' : '#eee');
+    const icon = isLate ? '⚠️' : (ok ? '✅' : s.icon);
+    return `<div style="flex:1;text-align:center;padding:8px 2px;border-radius:10px;font-size:12px;background:${bg};color:${fg};border:1px solid ${bd}">
+      <div style="font-size:16px">${icon}</div>
+      <div style="margin-top:2px;font-weight:600">${s.short}${isLate ? '<br>迟到' : ''}</div><div>${s.time}</div>
     </div>`;
   }).join('');
   $('person-records').innerHTML = '<div style="color:var(--muted);text-align:center;padding:20px">加载中...</div>';
@@ -392,14 +415,18 @@ function renderPersonRecords(rows) {
     const dateStr = `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()}`;
     const items = list.map(r => {
       const s = PUNCH_SLOTS[punchSlotOf(r)];
+      const lateInfo = punchLateOf(r);
       const t = new Date(Number(r.created_at));
       const hm = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
       const loc = r.lat != null ? `<a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank" style="color:var(--primary)">${r.address ? esc(r.address) : '📍 地图位置'}</a>` : '';
+      const lateTag = lateInfo.late
+        ? `<span style="background:#fff3e0;color:#e65100;border:1px solid #ffcc80;border-radius:6px;padding:0 6px;font-size:12px;margin-left:6px;font-weight:600">⚠️ 迟到${lateInfo.lateMinutes}分钟</span>`
+        : '';
       return `
         <div style="display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #f5f5f5">
-          <div style="width:56px;font-weight:600;font-size:13px;color:var(--primary)">${s.icon} ${hm}</div>
+          <div style="width:56px;font-weight:600;font-size:13px;color:${lateInfo.late ? '#e65100' : 'var(--primary)'}">${s.icon} ${hm}</div>
           <div style="flex:1;min-width:0">
-            <div style="font-size:13px">${s.name}</div>
+            <div style="font-size:13px">${s.name}${lateTag}</div>
             <div style="font-size:12px;color:var(--muted)">${loc}${r.accuracy ? ` · 精度${Math.round(r.accuracy)}m` : ''}</div>
           </div>
           <button class="btn-del" onclick="delCheckinRefresh(${r.id})">删除</button>

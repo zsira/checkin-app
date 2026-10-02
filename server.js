@@ -178,6 +178,20 @@ function slotOf(checkin) {
   return getPunchSlot(new Date(Number(checkin.created_at)));
 }
 
+// 上班卡标准时间（分钟）：0=07:30 早上班，2=13:30 午上班
+const WORK_ON_STANDARD = { 0: 7 * 60 + 30, 2: 13 * 60 + 30 };
+const LATE_GRACE_MINUTES = 10; // 延后宽限 10 分钟；提前打卡一律正常
+// 返回 { late: bool, lateMinutes: number }（仅上班卡可能迟到）
+function punchLateOf(checkin) {
+  const slot = slotOf(checkin);
+  const standard = WORK_ON_STANDARD[slot];
+  if (standard === undefined) return { late: false, lateMinutes: 0 };
+  const d = new Date(Number(checkin.created_at));
+  const mins = d.getHours() * 60 + d.getMinutes();
+  const diff = mins - standard;
+  return diff > LATE_GRACE_MINUTES ? { late: true, lateMinutes: diff } : { late: false, lateMinutes: 0 };
+}
+
 // 根据请假记录生成请假日期集合（Set of dayKey）
 function buildLeaveDateSet(leaveRows) {
   const set = new Set();
@@ -568,7 +582,15 @@ app.post('/api/checkins', async (req, res) => {
       [g.id, userName.trim(), lat ?? null, lng ?? null, displayAddr, accuracy ?? null, punchType, now()]
     );
     const checkin = await pool.query('SELECT * FROM checkins WHERE id = $1', [info.rows[0].id]);
-    res.json({ ...checkin.rows[0], punch_name: PUNCH_SLOTS[punchType].name, punch_time: PUNCH_SLOTS[punchType].time, duplicated: dup.rows.length > 0 });
+    const lateInfo = punchLateOf(checkin.rows[0]);
+    res.json({
+      ...checkin.rows[0],
+      punch_name: PUNCH_SLOTS[punchType].name,
+      punch_time: PUNCH_SLOTS[punchType].time,
+      duplicated: dup.rows.length > 0,
+      late: lateInfo.late,
+      late_minutes: lateInfo.lateMinutes,
+    });
 
     // 后台异步获取详细地址
     if (isCoord && lat != null && lng != null) {
@@ -700,15 +722,20 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
     rows.rows.forEach(r => {
       const key = r.group_code + '|' + r.user_name;
       if (!map.has(key)) {
-        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), todaySlots: new Set(), totalCheckins: 0, first: r.created_at, last: r.created_at });
+        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), todaySlots: new Set(), todayLate: new Set(), lateCount: 0, totalCheckins: 0, first: r.created_at, last: r.created_at });
       }
       const p = map.get(key);
       const d = dk(r.created_at);
       const slot = slotOf(r);
+      const late = punchLateOf(r).late;
       // 每天记录已打卡的时段集合（同天同时段多次打卡只算一次）
       if (!p.days.has(d)) p.days.set(d, new Set());
       p.days.get(d).add(slot);
-      if (d === todayK) p.todaySlots.add(slot);
+      if (d === todayK) {
+        p.todaySlots.add(slot);
+        if (late) p.todayLate.add(slot);
+      }
+      if (late) p.lateCount++;
       p.totalCheckins++;
       if (r.created_at < p.first) p.first = r.created_at;
       if (r.created_at > p.last) p.last = r.created_at;
@@ -740,7 +767,9 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
         full_days: fullDays,
         absent_days: absentDays,
         leave_days: totalLeaveDays,
+        late_count: p.lateCount,
         today_slots: Array.from(p.todaySlots),
+        today_late: Array.from(p.todayLate),
         on_leave_today: leaveDates.has(todayK),
         first_checkin: p.first,
         last_checkin: p.last,
@@ -927,12 +956,13 @@ app.get('/api/admin/export', auth, async (req, res) => {
     rows.rows.forEach(r => {
       const key = r.group_code + '|' + r.user_name;
       if (!map.has(key)) {
-        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), total: 0, first: r.created_at, last: r.created_at });
+        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), total: 0, lateCount: 0, first: r.created_at, last: r.created_at });
       }
       const p = map.get(key);
       const d = dk(r.created_at);
       if (!p.days.has(d)) p.days.set(d, new Set());
       p.days.get(d).add(slotOf(r));
+      if (punchLateOf(r).late) p.lateCount++;
       p.total++;
       if (r.created_at < p.first) p.first = r.created_at;
       if (r.created_at > p.last) p.last = r.created_at;
@@ -954,7 +984,7 @@ app.get('/api/admin/export', auth, async (req, res) => {
         user_name: p.user_name, group_name: p.group_name,
         checkin_days: p.days.size, full_days: fullDays,
         absent_days: absentDays,
-        leave_days: leaveDates.size, total_checkins: p.total,
+        leave_days: leaveDates.size, late_count: p.lateCount, total_checkins: p.total,
       };
     });
 
@@ -962,12 +992,12 @@ app.get('/api/admin/export', auth, async (req, res) => {
       const s = v == null ? '' : String(v);
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
-    const headers = ['人员', '所属群组', '打卡天数', '完整卡天数', '缺卡天数', '请假天数', '打卡总数', '缺卡总数'];
+    const headers = ['人员', '所属群组', '打卡天数', '完整卡天数', '缺卡天数', '请假天数', '迟到次数', '打卡总数', '缺卡总数'];
     const lines = [headers.join(',')];
     for (const p of stats) {
       lines.push([
         p.user_name, p.group_name,
-        p.checkin_days, p.full_days, p.absent_days, p.leave_days,
+        p.checkin_days, p.full_days, p.absent_days, p.leave_days, p.late_count,
         p.total_checkins, p.absent_days
       ].map(escapeCsv).join(','));
     }
@@ -975,8 +1005,9 @@ app.get('/api/admin/export', auth, async (req, res) => {
     const sumFullDays = stats.reduce((s, p) => s + p.full_days, 0);
     const sumAbsent = stats.reduce((s, p) => s + p.absent_days, 0);
     const sumLeave = stats.reduce((s, p) => s + p.leave_days, 0);
+    const sumLate = stats.reduce((s, p) => s + p.late_count, 0);
     const sumTotal = stats.reduce((s, p) => s + p.total_checkins, 0);
-    lines.push(['合计', '', sumCheckinDays, sumFullDays, sumAbsent, sumLeave, sumTotal, sumAbsent].map(escapeCsv).join(','));
+    lines.push(['合计', '', sumCheckinDays, sumFullDays, sumAbsent, sumLeave, sumLate, sumTotal, sumAbsent].map(escapeCsv).join(','));
 
     const csv = '\uFEFF' + lines.join('\n');
     const filename = `打卡统计_${new Date().toISOString().slice(0, 10)}.csv`;
