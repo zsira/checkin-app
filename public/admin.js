@@ -296,34 +296,40 @@ function renderPersons() {
   });
 
   container.innerHTML = Array.from(groupMap.values()).map(g => {
-    const cards = g.members
+    const rows = g.members
       .sort((a, b) => (b.today_slots || []).length - (a.today_slots || []).length || b.checkin_days - a.checkin_days)
       .map(p => {
-        const initial = (p.user_name || '?').charAt(0).toUpperCase();
         const args = `'${esc(p.group_code).replace(/'/g, "\\'")}','${esc(p.user_name).replace(/'/g, "\\'")}'`;
         return `
-        <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;margin-bottom:8px;flex-wrap:wrap">
-          <div style="width:40px;height:40px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">${esc(initial)}</div>
-          <div style="flex:1;min-width:150px">
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <a href="javascript:void(0)" onclick="openPerson(${args})" style="color:var(--primary);font-weight:700;font-size:15px;text-decoration:none">${esc(p.user_name)}</a>
-              ${statusBadge(p)}
-            </div>
-            <div style="margin-top:4px;font-size:13px;color:var(--muted)">
-              今日 ${todayDots(p)}
-              <span style="margin-left:8px">打卡${p.checkin_days}天 · 完整卡<b style="color:#4f46e5">${p.full_days || 0}</b> · 缺卡<b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days}</b> · 请假<span style="color:#e67e22">${p.leave_days || 0}</span> · 共${p.total_checkins}次</span>
-            </div>
-          </div>
-          <div style="display:flex;gap:6px">
+        <tr>
+          <td>
+            <a href="javascript:void(0)" onclick="openPerson(${args})" style="color:var(--primary);font-weight:700;text-decoration:none">${esc(p.user_name)}</a>
+            <div style="margin-top:4px">${statusBadge(p)}</div>
+          </td>
+          <td style="white-space:nowrap">${todayDots(p)}</td>
+          <td>${p.checkin_days} 天</td>
+          <td><b style="color:#4f46e5">${p.full_days || 0} 天</b></td>
+          <td><b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days} 天</b></td>
+          <td style="color:#e67e22">${p.leave_days || 0} 天</td>
+          <td>${p.total_checkins} 次</td>
+          <td style="white-space:nowrap">
             <button class="btn-edit" onclick="openPerson(${args})">📋 记录</button>
             <button class="btn-del" onclick="delPerson(${args})">清除</button>
-          </div>
-        </div>`;
+          </td>
+        </tr>`;
       }).join('');
     return `
       <div style="margin-bottom:20px">
         <h3 style="font-size:15px;margin-bottom:8px;color:var(--primary)">${esc(g.group_name)} <span class="tag">${esc(g.group_code)}</span>（${g.members.length}人）</h3>
-        ${cards}
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>人员</th><th>今日打卡</th><th>打卡天数</th><th>完整卡天数</th>
+              <th>缺卡天数</th><th>请假天数</th><th>总计</th><th>操作</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
       </div>`;
   }).join('');
 }
