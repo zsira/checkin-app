@@ -143,6 +143,24 @@ async function initDb() {
   try { await pool.query('ALTER TABLE groups ADD COLUMN rest_reason TEXT'); } catch {}
   // 兼容性：打卡记录添加卡种字段（0早上班 1午下班 2午上班 3晚下班）
   try { await pool.query('ALTER TABLE checkins ADD COLUMN punch_type SMALLINT'); } catch {}
+  // 一次性数据修复：早期 punch_type 按服务器 UTC 时区计算，统一按北京时间（UTC+8）重算
+  try {
+    const fixed = await pool.query("SELECT value FROM admin_settings WHERE key = 'punch_type_cn_fixed'");
+    if (fixed.rows.length === 0) {
+      const all = await pool.query('SELECT id, created_at FROM checkins');
+      for (const r of all.rows) {
+        const mins = cnMins(Number(r.created_at));
+        let type;
+        if (mins < 9 * 60 + 45) type = 0;
+        else if (mins < 12 * 60 + 45) type = 1;
+        else if (mins < 15 * 60 + 45) type = 2;
+        else type = 3;
+        await pool.query('UPDATE checkins SET punch_type = $1 WHERE id = $2', [type, r.id]);
+      }
+      await pool.query("INSERT INTO admin_settings (key, value) VALUES ('punch_type_cn_fixed', '1') ON CONFLICT (key) DO NOTHING");
+      console.log('[迁移] 已按北京时间重算', all.rows.length, '条打卡记录的卡种');
+    }
+  } catch (e) { console.warn('[迁移] punch_type 重算失败:', e.message); }
   // 兼容性：补卡字段
   try { await pool.query('ALTER TABLE checkins ADD COLUMN is_makeup BOOLEAN DEFAULT false'); } catch {}
   try { await pool.query('ALTER TABLE checkins ADD COLUMN makeup_reason TEXT'); } catch {}
@@ -282,10 +300,33 @@ function genCode() {
 }
 function now() { return Date.now(); }
 
-// 日期 key（本地时区，按天）
+// ---------- 北京时间（UTC+8）工具 ----------
+// 服务器（Railway）时区为 UTC，所有打卡业务时间（卡种、迟到、跨天、缺卡）必须统一按北京时间计算
+const CN_OFFSET_MS = 8 * 60 * 60 * 1000;
+// 返回一个 Date，其 UTC 字段对应该时刻的北京时间字段
+function cnDate(ts = Date.now()) { return new Date(Number(ts) + CN_OFFSET_MS); }
+function cnMins(ts = Date.now()) { const d = cnDate(ts); return d.getUTCHours() * 60 + d.getUTCMinutes(); }
+function cnDayKey(ts) {
+  const d = cnDate(ts);
+  return `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
+}
+// 北京时间当天 00:00 对应的 UTC 时间戳
+function cnDayStart(ts = Date.now()) {
+  const d = cnDate(ts);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - CN_OFFSET_MS;
+}
+function cnFmtDateTime(ts) {
+  const d = cnDate(ts);
+  return `${d.getUTCFullYear()}/${d.getUTCMonth() + 1}/${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+}
+function cnFmtShort(ts) {
+  const d = cnDate(ts);
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+}
+
+// 日期 key（按北京时间）
 function dayKey(ts) {
-  const d = new Date(Number(ts));
-  return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+  return cnDayKey(ts);
 }
 
 // 固定四个打卡时段（标准时间点）
@@ -296,9 +337,10 @@ const PUNCH_SLOTS = [
   { type: 2, name: '下午上班卡', time: '13:30' },
   { type: 3, name: '下午下班卡', time: '18:00' },
 ];
-// 按相邻标准时间点的中点划分归属窗口：09:45 / 12:45 / 15:45
-function getPunchSlot(date = new Date()) {
-  const mins = date.getHours() * 60 + date.getMinutes();
+// 按相邻标准时间点的中点划分归属窗口：09:45 / 12:45 / 15:45（均按北京时间）
+function getPunchSlot(dateOrTs = Date.now()) {
+  const ts = dateOrTs instanceof Date ? dateOrTs.getTime() : Number(dateOrTs);
+  const mins = cnMins(ts);
   if (mins < 9 * 60 + 45) return 0;        // < 09:45 → 早上上班卡
   if (mins < 12 * 60 + 45) return 1;       // < 12:45 → 中午下班卡
   if (mins < 15 * 60 + 45) return 2;       // < 15:45 → 下午上班卡
@@ -313,25 +355,23 @@ function slotOf(checkin) {
 // 上班卡标准时间（分钟）：0=07:30 早上班，2=13:30 午上班
 const WORK_ON_STANDARD = { 0: 7 * 60 + 30, 2: 13 * 60 + 30 };
 const LATE_GRACE_MINUTES = 10; // 延后宽限 10 分钟；提前打卡一律正常
-// 返回 { late: bool, lateMinutes: number }（仅上班卡可能迟到；管理员补卡一律正常）
+// 返回 { late: bool, lateMinutes: number }（仅上班卡可能迟到；管理员补卡一律正常；按北京时间）
 function punchLateOf(checkin) {
   if (checkin.is_makeup) return { late: false, lateMinutes: 0 };
   const slot = slotOf(checkin);
   const standard = WORK_ON_STANDARD[slot];
   if (standard === undefined) return { late: false, lateMinutes: 0 };
-  const d = new Date(Number(checkin.created_at));
-  const mins = d.getHours() * 60 + d.getMinutes();
-  const diff = mins - standard;
+  const diff = cnMins(Number(checkin.created_at)) - standard;
   return diff > LATE_GRACE_MINUTES ? { late: true, lateMinutes: diff } : { late: false, lateMinutes: 0 };
 }
 
-// 根据请假记录生成请假日期集合（Set of dayKey）
+// 根据请假记录生成请假日期集合（Set of dayKey，按北京时间）
 function buildLeaveDateSet(leaveRows) {
   const set = new Set();
   for (const l of leaveRows) {
-    const start = new Date(Number(l.start_ts)); start.setHours(0, 0, 0, 0);
-    const end = new Date(Number(l.end_ts)); end.setHours(0, 0, 0, 0);
-    for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
+    const start = cnDayStart(Number(l.start_ts));
+    const end = cnDayStart(Number(l.end_ts));
+    for (let t = start; t <= end; t += 86400000) {
       set.add(dayKey(t));
     }
   }
@@ -662,8 +702,7 @@ app.post('/api/checkins', async (req, res) => {
 
     // 休息期间禁止打卡
     if (g.rest_until && Number(g.rest_until) > Date.now()) {
-      const restEnd = new Date(Number(g.rest_until));
-      const restInfo = `休息中，截止 ${restEnd.getFullYear()}/${restEnd.getMonth()+1}/${restEnd.getDate()} ${String(restEnd.getHours()).padStart(2,'0')}:${String(restEnd.getMinutes()).padStart(2,'0')}`;
+      const restInfo = `休息中，截止 ${cnFmtDateTime(Number(g.rest_until))}`;
       if (g.rest_reason) return res.status(403).json({ error: `${restInfo}\n原因：${g.rest_reason}`, rest_until: g.rest_until, rest_reason: g.rest_reason });
       return res.status(403).json({ error: restInfo, rest_until: g.rest_until, rest_reason: g.rest_reason });
     }
@@ -680,12 +719,11 @@ app.post('/api/checkins', async (req, res) => {
       }
     }
 
-    // 打卡时间校验
+    // 打卡时间校验（按北京时间）
     try {
       const times = JSON.parse(g.checkin_times || '[]');
       if (times.length > 0) {
-        const now = new Date();
-        const curMins = now.getHours() * 60 + now.getMinutes();
+        const curMins = cnMins(Date.now());
         const inWindow = times.some(t => {
           const [sh, sm] = (t.start || '00:00').split(':').map(Number);
           const [eh, em] = (t.end || '23:59').split(':').map(Number);
@@ -702,9 +740,9 @@ app.post('/api/checkins', async (req, res) => {
 
     const isCoord = /^\-?\d+\.\d+,\s*\-?\d+\.\d+$/.test(address || '');
     const displayAddr = (address && !isCoord) ? address : `${lat?.toFixed(5)}, ${lng?.toFixed(5)}`;
-    const punchType = getPunchSlot(new Date());
-    // 查询今天该卡种是否已打过
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const punchType = getPunchSlot(Date.now());
+    // 查询今天（北京时间）该卡种是否已打过
+    const todayStart = cnDayStart(Date.now());
     const dup = await pool.query(
       'SELECT id FROM checkins WHERE group_id = $1 AND user_name = $2 AND punch_type = $3 AND created_at >= $4 LIMIT 1',
       [g.id, userName.trim(), punchType, todayStart.getTime()]
@@ -779,10 +817,7 @@ app.post('/api/leaves', async (req, res) => {
     );
     // 后台推送给所有管理员
     const grp = await pool.query('SELECT name FROM groups WHERE id = $1', [group.rows[0].id]);
-    const fmt = ts => {
-      const d = new Date(Number(ts));
-      return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-    };
+    const fmt = ts => cnFmtShort(ts);
     const days = ((end - start) / 86400000).toFixed(1).replace(/\.0$/, '');
     pushToAdmins({
       title: '📝 新请假申请',
@@ -925,7 +960,7 @@ app.get('/api/push/pending', async (req, res) => {
 app.post('/api/push/test', async (req, res) => {
   try {
     const { scope, group_code, user_name } = req.body || {};
-    const payload = { title: '🔔 推送测试成功', body: `这是一条测试通知，发送时间 ${new Date().toLocaleString('zh-CN')}`, tag: 'test-' + Date.now() };
+    const payload = { title: '🔔 推送测试成功', body: `这是一条测试通知，发送时间 ${cnFmtDateTime(Date.now())}`, tag: 'test-' + Date.now() };
     if (scope === 'admin') {
       await pushToAdmins(payload);
     } else if (group_code && user_name) {
@@ -1005,11 +1040,11 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
       const checkinDays = p.days.size;
       const key = p.group_code + '|' + p.user_name;
       const leaveDates = leaveMap.get(key) || new Set();
-      // 计算缺卡天数：首次到末次打卡之间，未打卡且未请假的天数
-      const first = new Date(Number(p.first)); first.setHours(0, 0, 0, 0);
-      const last = new Date(Number(p.last)); last.setHours(0, 0, 0, 0);
+      // 计算缺卡天数：首次到末次打卡之间，未打卡且未请假的天数（按北京时间）
+      const firstDay = cnDayStart(Number(p.first));
+      const lastDay = cnDayStart(Number(p.last));
       let absentDays = 0, leaveDaysInRange = 0;
-      for (let t = first.getTime(); t <= last.getTime(); t += 86400000) {
+      for (let t = firstDay; t <= lastDay; t += 86400000) {
         const k = dk(t);
         if (p.days.has(k)) continue;           // 已打卡
         if (leaveDates.has(k)) { leaveDaysInRange++; continue; } // 请假，不计缺卡
@@ -1126,7 +1161,7 @@ app.post('/api/admin/persons/makeup-checkin', auth, async (req, res) => {
     const group = await pool.query('SELECT * FROM groups WHERE code = $1', [code]);
     if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
     const g = group.rows[0];
-    const punchType = getPunchSlot(new Date(punchTs));
+    const punchType = getPunchSlot(punchTs);
     const info = await pool.query(
       `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, punch_type, is_makeup, makeup_reason, created_at)
        VALUES ($1, $2, NULL, NULL, $3, NULL, $4, true, $5, $6) RETURNING id`,
@@ -1134,8 +1169,7 @@ app.post('/api/admin/persons/makeup-checkin', auth, async (req, res) => {
     );
     const row = await pool.query('SELECT * FROM checkins WHERE id = $1', [info.rows[0].id]);
     // 后台推送给被补卡成员（页面关闭也能收到）
-    const md = new Date(punchTs);
-    const timeStr = `${md.getFullYear()}/${md.getMonth()+1}/${md.getDate()} ${String(md.getHours()).padStart(2,'0')}:${String(md.getMinutes()).padStart(2,'0')}`;
+    const timeStr = cnFmtDateTime(punchTs);
     pushToUser(code, user.trim(), {
       title: '🔧 管理员补卡通知',
       body: `已为你补卡：${PUNCH_SLOTS[punchType].name}（${timeStr}），状态正常${reason ? '\n原因：' + reason.trim() : ''}`,
@@ -1200,8 +1234,7 @@ app.post('/api/admin/groups/:id/rest', auth, async (req, res) => {
     if (gr.rows.length) {
       const g = gr.rows[0];
       if (until && until > Date.now()) {
-        const d = new Date(until);
-        const timeStr = `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        const timeStr = cnFmtDateTime(until);
         pushToGroup(g.code, {
           title: '🛌 群组休息通知',
           body: `${g.name}休息中，暂停打卡至 ${timeStr}${rest_reason ? '\n原因：' + rest_reason : ''}`,
@@ -1281,10 +1314,10 @@ app.get('/api/admin/export', auth, async (req, res) => {
 
     const stats = Array.from(map.values()).map(p => {
       const leaveDates = leaveMap.get(p.group_code + '|' + p.user_name) || new Set();
-      const first = new Date(Number(p.first)); first.setHours(0, 0, 0, 0);
-      const last = new Date(Number(p.last)); last.setHours(0, 0, 0, 0);
+      const firstDay = cnDayStart(Number(p.first));
+      const lastDay = cnDayStart(Number(p.last));
       let absentDays = 0;
-      for (let t = first.getTime(); t <= last.getTime(); t += 86400000) {
+      for (let t = firstDay; t <= lastDay; t += 86400000) {
         const k = dk(t);
         if (p.days.has(k) || leaveDates.has(k)) continue;
         absentDays++;
@@ -1321,7 +1354,7 @@ app.get('/api/admin/export', auth, async (req, res) => {
     lines.push(['合计', '', sumCheckinDays, sumFullDays, sumAbsent, sumLeave, sumLate, sumTotal, sumAbsent].map(escapeCsv).join(','));
 
     const csv = '\uFEFF' + lines.join('\n');
-    const filename = `打卡统计_${new Date().toISOString().slice(0, 10)}.csv`;
+    const filename = `打卡统计_${cnDayKey(Date.now())}.csv`;
     const encodedName = encodeURIComponent(filename);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="checkin.csv"; filename*=UTF-8''${encodedName}`);
