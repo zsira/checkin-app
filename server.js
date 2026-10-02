@@ -79,6 +79,8 @@ async function initDb() {
       address TEXT,
       accuracy DOUBLE PRECISION,
       punch_type SMALLINT,
+      is_makeup BOOLEAN DEFAULT false,
+      makeup_reason TEXT,
       created_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_checkins_group ON checkins(group_id);
@@ -111,6 +113,9 @@ async function initDb() {
   try { await pool.query('ALTER TABLE groups ADD COLUMN rest_reason TEXT'); } catch {}
   // 兼容性：打卡记录添加卡种字段（0早上班 1午下班 2午上班 3晚下班）
   try { await pool.query('ALTER TABLE checkins ADD COLUMN punch_type SMALLINT'); } catch {}
+  // 兼容性：补卡字段
+  try { await pool.query('ALTER TABLE checkins ADD COLUMN is_makeup BOOLEAN DEFAULT false'); } catch {}
+  try { await pool.query('ALTER TABLE checkins ADD COLUMN makeup_reason TEXT'); } catch {}
 
   // 初始化超级管理员
   const envPassword = process.env.ADMIN_PASSWORD;
@@ -181,8 +186,9 @@ function slotOf(checkin) {
 // 上班卡标准时间（分钟）：0=07:30 早上班，2=13:30 午上班
 const WORK_ON_STANDARD = { 0: 7 * 60 + 30, 2: 13 * 60 + 30 };
 const LATE_GRACE_MINUTES = 10; // 延后宽限 10 分钟；提前打卡一律正常
-// 返回 { late: bool, lateMinutes: number }（仅上班卡可能迟到）
+// 返回 { late: bool, lateMinutes: number }（仅上班卡可能迟到；管理员补卡一律正常）
 function punchLateOf(checkin) {
+  if (checkin.is_makeup) return { late: false, lateMinutes: 0 };
   const slot = slotOf(checkin);
   const standard = WORK_ON_STANDARD[slot];
   if (standard === undefined) return { late: false, lateMinutes: 0 };
@@ -851,6 +857,30 @@ app.delete('/api/admin/persons/checkins', auth, async (req, res) => {
       [code, user]
     );
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 管理员为成员补卡（选择补卡时间；补卡记录显示正常打卡状态）
+app.post('/api/admin/persons/makeup-checkin', auth, async (req, res) => {
+  try {
+    const { code, user, ts, reason } = req.body || {};
+    if (!code || !user || !ts) return res.status(400).json({ error: '缺少参数' });
+    const punchTs = Number(ts);
+    if (!Number.isFinite(punchTs) || punchTs <= 0) return res.status(400).json({ error: '补卡时间无效' });
+    if (punchTs > Date.now()) return res.status(400).json({ error: '补卡时间不能晚于当前时间' });
+    const group = await pool.query('SELECT * FROM groups WHERE code = $1', [code]);
+    if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    const g = group.rows[0];
+    const punchType = getPunchSlot(new Date(punchTs));
+    const info = await pool.query(
+      `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, punch_type, is_makeup, makeup_reason, created_at)
+       VALUES ($1, $2, NULL, NULL, $3, NULL, $4, true, $5, $6) RETURNING id`,
+      [g.id, user.trim(), '管理员补卡', punchType, (reason || '').trim() || null, punchTs]
+    );
+    const row = await pool.query('SELECT * FROM checkins WHERE id = $1', [info.rows[0].id]);
+    res.json({ ...row.rows[0], punch_name: PUNCH_SLOTS[punchType].name, punch_time: PUNCH_SLOTS[punchType].time });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

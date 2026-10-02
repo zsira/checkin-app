@@ -30,9 +30,10 @@ function punchSlotOf(r) {
   if (r.punch_type != null) return Number(r.punch_type);
   return currentPunchSlot(new Date(Number(r.created_at)));
 }
-// 上班卡标准时间：0=07:30，2=13:30；提前或延后10分钟内正常，超过记迟到
+// 上班卡标准时间：0=07:30，2=13:30；提前或延后10分钟内正常，超过记迟到；管理员补卡一律正常
 const WORK_ON_STANDARD = { 0: 7 * 60 + 30, 2: 13 * 60 + 30 };
 function punchLateOf(r) {
+  if (r.is_makeup) return { late: false, lateMinutes: 0 };
   const slot = punchSlotOf(r);
   const standard = WORK_ON_STANDARD[slot];
   if (standard === undefined) return { late: false, lateMinutes: 0 };
@@ -547,9 +548,47 @@ async function loadRecords() {
     myRecords = rows;
     renderRecords(rows);
     renderPunchProgress(rows);
+    detectNewMakeup(rows);
   } catch (e) {
     console.error(e);
   }
+}
+
+// ---------- 管理员补卡推送 ----------
+let knownMakeupIds = null;
+let makeupPollTimer = null;
+
+function startMakeupPolling() {
+  if (makeupPollTimer) return;
+  makeupPollTimer = setInterval(() => {
+    // 仅在已进入群组且主页可见时轮询
+    const mainView = document.getElementById('view-main');
+    if (state.groupCode && (!mainView || !mainView.classList.contains('hidden'))) {
+      loadRecords(true);
+    }
+  }, 30000);
+}
+
+function detectNewMakeup(rows) {
+  const makeupRows = rows.filter(r => r.is_makeup);
+  if (knownMakeupIds === null) {
+    // 首次加载只建立基线，不推送历史补卡
+    knownMakeupIds = new Set(makeupRows.map(r => r.id));
+    startMakeupPolling();
+    return;
+  }
+  const fresh = makeupRows.filter(r => !knownMakeupIds.has(r.id));
+  fresh.forEach(r => {
+    knownMakeupIds.add(r.id);
+    const d = new Date(Number(r.created_at));
+    const timeStr = `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    const slot = PUNCH_SLOTS[punchSlotOf(r)];
+    const body = `管理员已为你补卡：${slot.name}（${timeStr}），状态正常${r.makeup_reason ? '\n原因：' + r.makeup_reason : ''}`;
+    toast('🔧 收到一条管理员补卡记录');
+    if (Notification.permission === 'granted') {
+      new Notification('🔧 补卡通知', { body, tag: 'makeup-' + r.id });
+    }
+  });
 }
 
 // 顶部显示当前应打卡种
@@ -606,14 +645,19 @@ function renderRecords(rows) {
     const lateTag = lateInfo.late
       ? `<span style="display:inline-block;background:#fff3e0;color:#e65100;border:1px solid #ffcc80;border-radius:8px;padding:0 7px;font-size:12px;margin-right:6px;font-weight:600">⚠️ 迟到${lateInfo.lateMinutes}分钟</span>`
       : '';
-    const addr = r.address
-      ? `<div class="record-addr">📍 ${escapeHtml(r.address)}</div>`
-      : (r.lat != null ? `<div class="record-addr"><a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank">📍 ${r.lat.toFixed(5)}, ${r.lng.toFixed(5)}</a></div>` : '');
+    const makeupTag = r.is_makeup
+      ? `<span style="display:inline-block;background:#e0f7fa;color:#0277bd;border:1px solid #80deea;border-radius:8px;padding:0 7px;font-size:12px;margin-right:6px;font-weight:600">🔧 补卡·正常</span>`
+      : '';
+    const addr = r.is_makeup
+      ? `<div class="record-addr">🔧 管理员补卡${r.makeup_reason ? ' · ' + escapeHtml(r.makeup_reason) : ''}</div>`
+      : (r.address
+        ? `<div class="record-addr">📍 ${escapeHtml(r.address)}</div>`
+        : (r.lat != null ? `<div class="record-addr"><a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank">📍 ${r.lat.toFixed(5)}, ${r.lng.toFixed(5)}</a></div>` : ''));
     return `
-      <div class="record-item">
+      <div class="record-item"${r.is_makeup ? ' style="border-left:3px solid #0277bd;background:#f5fcfe"' : ''}>
         <div class="record-avatar">${escapeHtml(initial)}</div>
         <div class="record-body">
-          <div class="record-user">${slotTag}${lateTag}${escapeHtml(r.user_name)}</div>
+          <div class="record-user">${slotTag}${lateTag}${makeupTag}${escapeHtml(r.user_name)}</div>
           <div class="record-time">${time}</div>
           ${addr}
         </div>

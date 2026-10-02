@@ -303,10 +303,34 @@
       <p class="muted" style="font-size:13px;margin-bottom:10px">群组：<b id="person-modal-group"></b></p>
       <div id="person-modal-stats" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
       <div id="person-modal-today" style="display:flex;gap:6px;margin-bottom:14px"></div>
-      <div style="font-size:14px;font-weight:600;margin-bottom:8px">打卡记录</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-size:14px;font-weight:600">打卡记录</div>
+        <button class="btn-edit" id="person-makeup-btn" style="color:#0277bd">🔧 补卡</button>
+      </div>
       <div id="person-records" style="max-height:45vh;overflow-y:auto"></div>
       <div class="modal-actions">
         <button class="btn-cancel" id="person-modal-close" style="flex:1">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 补卡弹窗 -->
+  <div id="makeup-modal" class="modal-mask hidden">
+    <div class="modal">
+      <h3>🔧 为成员补卡</h3>
+      <p class="muted" style="font-size:13px;margin-bottom:12px">成员：<b id="makeup-user"></b>　群组：<b id="makeup-group"></b></p>
+      <div class="field">
+        <label>补卡时间（按此时间自动归属卡种，状态记为正常）</label>
+        <input id="makeup-time" class="input" type="datetime-local">
+      </div>
+      <div id="makeup-slot-preview" style="font-size:13px;margin-bottom:14px;color:var(--primary)"></div>
+      <div class="field">
+        <label>补卡原因（可选，成员可见）</label>
+        <input id="makeup-reason" class="input" type="text" placeholder="如：忘记打卡、设备故障等">
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="makeup-cancel" style="flex:1">取消</button>
+        <button class="btn-save" id="makeup-confirm" style="flex:1">确认补卡</button>
       </div>
     </div>
   </div>

@@ -109,6 +109,11 @@ function init() {
     if (e.target.id === 'person-modal') { $('person-modal').classList.add('hidden'); currentPersonKey = ''; }
   });
 
+  // 补卡弹窗
+  $('makeup-cancel').onclick = closeMakeup;
+  $('makeup-confirm').onclick = confirmMakeup;
+  $('makeup-time').onchange = previewMakeupSlot;
+
   $('filter-person').addEventListener('input', () => { renderPersons(); });
 }
 
@@ -330,6 +335,7 @@ function renderPersons() {
           <td>${p.total_checkins} 次</td>
           <td style="white-space:nowrap">
             <button class="btn-edit" onclick="openPerson(${args})">📋 记录</button>
+            <button class="btn-edit" style="color:#0277bd" onclick="openMakeup(${args})">🔧 补卡</button>
             <button class="btn-del" onclick="delPerson(${args})">清除</button>
           </td>
         </tr>`;
@@ -356,6 +362,7 @@ let currentPersonKey = '';
 async function openPerson(code, user) {
   currentPersonKey = code + '|' + user;
   const p = memberStats.find(m => m.group_code === code && m.user_name === user);
+  $('person-makeup-btn').onclick = () => openMakeup(code, user);
   $('person-modal-title').textContent = '👤 ' + user;
   $('person-modal-group').textContent = p ? `${p.group_name}（${p.group_code}）` : code;
   // 统计徽标
@@ -418,15 +425,20 @@ function renderPersonRecords(rows) {
       const lateInfo = punchLateOf(r);
       const t = new Date(Number(r.created_at));
       const hm = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
-      const loc = r.lat != null ? `<a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank" style="color:var(--primary)">${r.address ? esc(r.address) : '📍 地图位置'}</a>` : '';
       const lateTag = lateInfo.late
         ? `<span style="background:#fff3e0;color:#e65100;border:1px solid #ffcc80;border-radius:6px;padding:0 6px;font-size:12px;margin-left:6px;font-weight:600">⚠️ 迟到${lateInfo.lateMinutes}分钟</span>`
         : '';
+      const makeupTag = r.is_makeup
+        ? `<span style="background:#e0f7fa;color:#0277bd;border:1px solid #80deea;border-radius:6px;padding:0 6px;font-size:12px;margin-left:6px;font-weight:600">🔧 补卡·正常</span>`
+        : '';
+      const loc = r.is_makeup
+        ? `<span style="color:var(--muted)">管理员补卡${r.makeup_reason ? ' · ' + esc(r.makeup_reason) : ''}</span>`
+        : (r.lat != null ? `<a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank" style="color:var(--primary)">${r.address ? esc(r.address) : '📍 地图位置'}</a>` : '');
       return `
         <div style="display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #f5f5f5">
           <div style="width:56px;font-weight:600;font-size:13px;color:${lateInfo.late ? '#e65100' : 'var(--primary)'}">${s.icon} ${hm}</div>
           <div style="flex:1;min-width:0">
-            <div style="font-size:13px">${s.name}${lateTag}</div>
+            <div style="font-size:13px">${s.name}${lateTag}${makeupTag}</div>
             <div style="font-size:12px;color:var(--muted)">${loc}${r.accuracy ? ` · 精度${Math.round(r.accuracy)}m` : ''}</div>
           </div>
           <button class="btn-del" onclick="delCheckinRefresh(${r.id})">删除</button>
@@ -458,6 +470,65 @@ async function delPerson(code, user) {
     method: 'DELETE', headers: authHeaders(),
   });
   loadAll();
+}
+
+// ---------- 补卡 ----------
+let makeupTarget = null; // { code, user }
+
+function localDatetimeValue(d = new Date()) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function openMakeup(code, user) {
+  makeupTarget = { code, user };
+  const p = memberStats.find(m => m.group_code === code && m.user_name === user);
+  $('makeup-user').textContent = user;
+  $('makeup-group').textContent = p ? `${p.group_name}（${p.group_code}）` : code;
+  $('makeup-time').value = localDatetimeValue();
+  $('makeup-reason').value = '';
+  previewMakeupSlot();
+  $('makeup-modal').classList.remove('hidden');
+}
+
+function closeMakeup() {
+  $('makeup-modal').classList.add('hidden');
+  makeupTarget = null;
+}
+
+function previewMakeupSlot() {
+  const v = $('makeup-time').value;
+  const box = $('makeup-slot-preview');
+  if (!v) { box.innerHTML = ''; return; }
+  const ts = new Date(v).getTime();
+  const slot = PUNCH_SLOTS[punchSlotOf({ punch_type: null, created_at: ts })];
+  box.innerHTML = `将记为：${slot.icon} <b>${slot.name}</b>（标准 ${slot.time}），状态：<b style="color:#2e7d32">正常</b>`;
+}
+
+async function confirmMakeup() {
+  if (!makeupTarget) return;
+  const v = $('makeup-time').value;
+  if (!v) { alert('请选择补卡时间'); return; }
+  const ts = new Date(v).getTime();
+  if (ts > Date.now()) { alert('补卡时间不能晚于当前时间'); return; }
+  const reason = $('makeup-reason').value.trim();
+  try {
+    const res = await fetch('/api/admin/persons/makeup-checkin', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ code: makeupTarget.code, user: makeupTarget.user, ts, reason }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    closeMakeup();
+    await loadAll();
+    // 若详情弹窗打开着则刷新
+    if (currentPersonKey) {
+      const [code, user] = currentPersonKey.split('|');
+      openPerson(code, user);
+    }
+  } catch (e) {
+    alert('补卡失败：' + e.message);
+  }
 }
 
 function renderCheckins() {
