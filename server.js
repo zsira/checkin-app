@@ -118,6 +118,24 @@ async function initDb() {
       created_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_push_target ON push_subscriptions(scope, group_code, user_name);
+    CREATE TABLE IF NOT EXISTS push_events (
+      id BIGSERIAL PRIMARY KEY,
+      scope TEXT NOT NULL DEFAULT 'user',
+      group_code TEXT,
+      user_name TEXT,
+      title TEXT NOT NULL,
+      body TEXT,
+      tag TEXT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_push_events_target ON push_events(scope, group_code, user_name, id);
+    CREATE TABLE IF NOT EXISTS sync_clients (
+      client_id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL DEFAULT 'user',
+      group_code TEXT,
+      user_name TEXT,
+      updated_at BIGINT NOT NULL
+    );
   `);
 
   // 兼容性：添加休息字段（如已存在则跳过）
@@ -197,8 +215,20 @@ async function sendOnePush(sub, payload) {
   }
 }
 
+// 记录推送事件（供不支持 Web Push 的设备用定时同步兜底拉取）
+async function recordEvent(scope, groupCode, userName, payload) {
+  try {
+    await pool.query(
+      `INSERT INTO push_events (scope, group_code, user_name, title, body, tag, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [scope, groupCode || null, userName || null, payload.title || '通知', payload.body || '', payload.tag || null, Date.now()]
+    );
+  } catch (e) { console.error('[推送] 事件记录失败:', e.message); }
+}
+
 // 推送给指定群组中的某个成员
 async function pushToUser(groupCode, userName, payload) {
+  await recordEvent('user', groupCode, userName, payload);
   if (!pushReady) return;
   try {
     const r = await pool.query(
@@ -211,6 +241,7 @@ async function pushToUser(groupCode, userName, payload) {
 
 // 群发给整个群组成员
 async function pushToGroup(groupCode, payload) {
+  await recordEvent('user', groupCode, null, payload);
   if (!pushReady) return;
   try {
     const r = await pool.query(
@@ -223,6 +254,7 @@ async function pushToGroup(groupCode, payload) {
 
 // 推送给所有管理员
 async function pushToAdmins(payload) {
+  await recordEvent('admin', null, null, payload);
   if (!pushReady) return;
   try {
     const r = await pool.query("SELECT DISTINCT ON (endpoint) * FROM push_subscriptions WHERE scope = 'admin'");
@@ -831,6 +863,76 @@ app.post('/api/push/unsubscribe', async (req, res) => {
   try {
     const { endpoint } = req.body || {};
     if (endpoint) await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 兜底通道：定时同步客户端登记（不依赖浏览器推送服务/谷歌服务）
+app.post('/api/push/sync-register', async (req, res) => {
+  try {
+    const { client_id, scope, group_code, user_name } = req.body || {};
+    if (!client_id) return res.status(400).json({ error: '缺少 client_id' });
+    const s = (scope === 'admin') ? 'admin' : 'user';
+    await pool.query(
+      `INSERT INTO sync_clients (client_id, scope, group_code, user_name, updated_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (client_id) DO UPDATE
+       SET scope = EXCLUDED.scope, group_code = EXCLUDED.group_code,
+           user_name = EXCLUDED.user_name, updated_at = EXCLUDED.updated_at`,
+      [String(client_id), s, group_code || null, (user_name || '').trim() || null, Date.now()]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 兜底通道：拉取属于该客户端的未读事件
+app.get('/api/push/pending', async (req, res) => {
+  try {
+    const { client_id, since } = req.query;
+    if (!client_id) return res.status(400).json({ error: '缺少 client_id' });
+    const sinceId = parseInt(since || '0', 10) || 0;
+    const cli = await pool.query('SELECT * FROM sync_clients WHERE client_id = $1', [String(client_id)]);
+    if (cli.rows.length === 0) return res.json({ events: [], max_id: sinceId });
+    const c = cli.rows[0];
+    let rows;
+    if (c.scope === 'admin') {
+      rows = await pool.query(
+        `SELECT id, title, body, tag, created_at FROM push_events
+         WHERE scope = 'admin' AND id > $1 ORDER BY id ASC LIMIT 50`,
+        [sinceId]
+      );
+    } else {
+      rows = await pool.query(
+        `SELECT id, title, body, tag, created_at FROM push_events
+         WHERE scope = 'user' AND group_code = $1 AND id > $2
+           AND (user_name IS NULL OR user_name = $3)
+         ORDER BY id ASC LIMIT 50`,
+        [c.group_code, sinceId, c.user_name || '']
+      );
+    }
+    const maxId = rows.rows.length ? rows.rows[rows.rows.length - 1].id : sinceId;
+    res.json({ events: rows.rows, max_id: maxId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 发送测试通知
+app.post('/api/push/test', async (req, res) => {
+  try {
+    const { scope, group_code, user_name } = req.body || {};
+    const payload = { title: '🔔 推送测试成功', body: `这是一条测试通知，发送时间 ${new Date().toLocaleString('zh-CN')}`, tag: 'test-' + Date.now() };
+    if (scope === 'admin') {
+      await pushToAdmins(payload);
+    } else if (group_code && user_name) {
+      await pushToUser(group_code, user_name.trim(), payload);
+    } else {
+      return res.status(400).json({ error: '缺少参数' });
+    }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

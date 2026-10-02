@@ -130,6 +130,7 @@ function showAdmin() {
   if (!refreshTimer) refreshTimer = setInterval(loadAll, 30000);
   updateAdminPushButton();
   syncAdminPush(); // 已授权则自动静默订阅
+  registerAdminSyncFallback(); // 兜底定时通道（安装到桌面后生效）
 }
 
 // ---------- Web Push（接收成员请假等后台推送） ----------
@@ -178,6 +179,37 @@ function updateAdminPushButton() {
   btn.disabled = false; btn.style.opacity = '';
   btn.textContent = Notification.permission === 'granted' ? '🔔 请假推送已开启'
     : Notification.permission === 'denied' ? '🔕 通知被禁用' : '🔔 开启请假推送';
+}
+
+// ---------- 兜底定时通道（无谷歌服务的手机也可用，需安装到桌面） ----------
+function adminClientId() {
+  let id = localStorage.getItem('ci_admin_client_id');
+  if (!id) { id = 'a_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); localStorage.setItem('ci_admin_client_id', id); }
+  return id;
+}
+async function registerAdminSyncFallback() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const clientId = adminClientId();
+    await fetch('/api/push/sync-register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId, scope: 'admin' }),
+    });
+    const reg = await navigator.serviceWorker.ready;
+    const msg = { type: 'sync-bind', scope: 'admin', clientId };
+    if (reg.active) reg.active.postMessage(msg);
+    if (navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage(msg);
+    if ('periodicSync' in reg && navigator.permissions) {
+      const st = await navigator.permissions.query({ name: 'periodic-background-sync' });
+      if (st.state === 'granted') {
+        const tags = await reg.periodicSync.getTags();
+        if (!tags.includes('checkin-sync-admin')) {
+          await reg.periodicSync.register('checkin-sync-admin', { minInterval: 12 * 60 * 60 * 1000 });
+        }
+      }
+    }
+  } catch (e) {}
 }
 
 // 页面打开时，SW 转发的服务端推送 → 轻提示并刷新数据
