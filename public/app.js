@@ -605,6 +605,37 @@ function pushSupported() {
   return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 }
 
+// 详细诊断当前环境，返回各项能力与失败原因
+function diagnosePushEnv() {
+  const d = {
+    isSecure: location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1',
+    sw: 'serviceWorker' in navigator,
+    push: 'PushManager' in window,
+    notification: 'Notification' in window,
+    permission: ('Notification' in window) ? Notification.permission : 'unsupported',
+    isStandalone: window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true,
+    ua: navigator.userAgent,
+  };
+  // 常见国产/不完整支持浏览器识别
+  d.browserHint = (() => {
+    const ua = d.ua;
+    if (/; wv\)/.test(ua)) return 'webview'; // 微信/QQ/应用内 WebView
+    if (/MicroMessenger/i.test(ua)) return 'wechat';
+    if (/QQBrowser|MQQBrowser/i.test(ua)) return 'qqbrowser';
+    if (/UCBrowser/i.test(ua)) return 'uc';
+    if (/MiuiBrowser/i.test(ua)) return 'mi';
+    if (/HeyTap|OPPO|ColorOS/i.test(ua)) return 'oppo';
+    if (/VivoBrowser|vivo/i.test(ua)) return 'vivo';
+    if (/HuaweiBrowser|HONOR/i.test(ua)) return 'huawei';
+    if (/Baidu|BIDUBrowser/i.test(ua)) return 'baidu';
+    if (/SamsungBrowser/i.test(ua)) return 'samsung';
+    if (/Chrome\//i.test(ua) && !/Edg|OPR|Vivo|Miui|HeyTap|Huawei|UCBrowser|QQBrowser/i.test(ua)) return 'chrome';
+    if (/^((?!chrome|android).)*safari/i.test(ua)) return 'safari';
+    return 'other';
+  })();
+  return d;
+}
+
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -614,79 +645,145 @@ function urlBase64ToUint8Array(base64String) {
   return output;
 }
 
-// 已授权时自动（重新）注册并绑定当前群组+人员
+// 已授权时自动（重新）注册并绑定当前群组+人员；返回 {ok, stage, error}
 async function syncPushSubscription() {
-  if (!pushSupported() || Notification.permission !== 'granted') return;
-  if (!state.groupCode || !state.userName) return;
+  if (!('Notification' in window)) return { ok: false, stage: '环境检测', error: '浏览器不支持通知' };
+  if (Notification.permission !== 'granted') return { ok: false, stage: '通知权限', error: '权限状态：' + Notification.permission };
+  if (!state.groupCode || !state.userName) return { ok: false, stage: '登录状态', error: '请先进入群组' };
+  if (!('serviceWorker' in navigator)) return { ok: false, stage: '环境检测', error: '浏览器不支持 Service Worker（网页后台推送的必要能力）' };
+  if (!('PushManager' in window)) return { ok: false, stage: '环境检测', error: '浏览器不支持 PushManager（推送服务未接入）' };
+  let reg, keyRes, key, sub, upRes;
   try {
-    const reg = await navigator.serviceWorker.ready;
-    const keyRes = await fetch('/api/push/vapid-key');
-    const { key } = await keyRes.json();
-    if (!key) return;
-    let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(key),
-      });
+    try {
+      reg = await navigator.serviceWorker.ready;
+    } catch (e) { return { ok: false, stage: '注册后台服务', error: e.message || String(e) }; }
+    try {
+      keyRes = await fetch('/api/push/vapid-key');
+      const data = await keyRes.json();
+      key = data.key;
+    } catch (e) { return { ok: false, stage: '获取推送密钥', error: e.message || String(e) }; }
+    if (!key) return { ok: false, stage: '获取推送密钥', error: '服务器未返回推送密钥（服务端可能未完成初始化，请稍后刷新重试）' };
+    try {
+      sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(key),
+        });
+      }
+    } catch (e) {
+      const name = e.name || '';
+      let hint = e.message || String(e);
+      if (name === 'NotAllowedError') hint = '订阅被拒绝（通知权限可能仅对当前会话有效，请关闭网页重新进入，或重装/更换浏览器）';
+      if (name === 'AbortError') hint = '浏览器推送服务不可用（常见于 vivo/OPPO/小米/华为/UC/QQ 等自带浏览器，需改用 Chrome）';
+      return { ok: false, stage: '向浏览器申请推送通道', error: hint };
     }
-    await fetch('/api/push/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subscription: sub, scope: 'user', group_code: state.groupCode, user_name: state.userName }),
-    });
+    try {
+      upRes = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: sub, scope: 'user', group_code: state.groupCode, user_name: state.userName }),
+      });
+      if (!upRes.ok) {
+        const t = await upRes.text().catch(() => '');
+        return { ok: false, stage: '登记到服务器', error: 'HTTP ' + upRes.status + ' ' + t };
+      }
+    } catch (e) { return { ok: false, stage: '登记到服务器', error: e.message || String(e) }; }
     updatePushButton();
+    return { ok: true };
   } catch (e) {
-    console.warn('推送订阅失败:', e);
+    return { ok: false, stage: '未知步骤', error: e.message || String(e) };
   }
 }
 
 async function enablePush() {
-  if (!pushSupported()) {
-    alert('当前浏览器不支持后台推送。\n\niPhone 用户：请用 Safari 打开本页面 → 底部分享按钮 →「添加到主屏幕」→ 从主屏幕图标进入后再开启（需 iOS 16.4 或更高版本）。\n\n安卓 Chrome 直接允许通知即可。');
+  // 先做环境体检
+  const env = diagnosePushEnv();
+  if (!env.sw || !env.push || !env.notification) {
+    showPushDiag(env, null);
     return;
   }
   try {
     let perm = Notification.permission;
-    if (perm === 'default') perm = await Notification.requestPermission();
+    if (perm === 'default') {
+      try { perm = await Notification.requestPermission(); } catch { perm = Notification.permission; }
+    }
     if (perm !== 'granted') {
-      showPushHelp();
+      showPushHelp(env);
       updatePushButton();
       return;
     }
-    await syncPushSubscription();
-    toast('🔔 已开启后台推送，锁屏或关闭页面也能收到通知');
+    const r = await syncPushSubscription();
+    if (r.ok) {
+      toast('🔔 已开启后台推送，锁屏或关闭页面也能收到通知');
+    } else {
+      showPushDiag(env, r);
+    }
+    updatePushButton();
   } catch (e) {
-    toast('开启失败：' + (e.message || '未知错误'));
+    showPushDiag(env, { ok: false, stage: '未知', error: e.message || String(e) });
   }
 }
 
-function showPushHelp() {
+const BROWSER_NAME = {
+  wechat: '微信内置浏览器', qqbrowser: 'QQ 浏览器', uc: 'UC 浏览器', mi: '小米/MIUI 浏览器',
+  oppo: 'OPPO/一加 浏览器', vivo: 'vivo 浏览器', huawei: '华为/荣耀浏览器', baidu: '百度浏览器',
+  samsung: '三星浏览器', chrome: 'Chrome', safari: 'Safari', webview: '应用内置 WebView', other: '当前浏览器',
+};
+
+function showPushDiag(env, result) {
   let mask = document.getElementById('push-help-mask');
-  if (mask) { mask.classList.remove('hidden'); return; }
-  mask = document.createElement('div');
-  mask.id = 'push-help-mask';
-  mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px';
+  if (!mask) {
+    mask = document.createElement('div');
+    mask.id = 'push-help-mask';
+    mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px';
+    document.body.appendChild(mask);
+  }
+  const bname = BROWSER_NAME[env.browserHint] || '当前浏览器';
+  const isLimited = ['wechat', 'qqbrowser', 'uc', 'mi', 'oppo', 'vivo', 'huawei', 'baidu', 'webview'].includes(env.browserHint);
+  const failLine = result
+    ? `<div style="background:#fff3e0;border:1px solid #ffcc80;border-radius:10px;padding:10px 12px;margin:10px 0;font-size:13px;color:#bf360c">
+         <b>失败环节：</b>${result.stage}<br><b>原因：</b>${result.error}
+       </div>`
+    : '';
   mask.innerHTML = `
-    <div style="background:#fff;border-radius:16px;max-width:420px;width:100%;max-height:88vh;overflow-y:auto;padding:22px 20px">
-      <div style="font-size:18px;font-weight:700;margin-bottom:12px">🔔 如何开启通知</div>
-      <div style="font-size:14px;line-height:1.7;color:#333">
-        <b style="color:#4f46e5">方法一：点地址栏小锁（推荐）</b><br>
-        1. 点网址左边的 <b>🔒 锁形图标</b><br>
-        2. 选择「权限 / 网站设置」<br>
-        3. 将「通知」改为 <b>允许</b><br>
-        4. 刷新页面，再点一次开启按钮<br><br>
-        <b style="color:#4f46e5">方法二：浏览器菜单</b><br>
-        菜单(≡) → 设置 → 隐私/网站设置 → 通知 → 找到本站 → 允许<br><br>
-        <b style="color:#e65100">国产浏览器找不到选项？</b><br>
-        vivo/OPPO/小米等自带浏览器可能不支持网页推送，请用 <b>Chrome</b> 打开本站，或点「📲 安装」添加到主屏幕后从桌面图标进入。<br><br>
-        <b style="color:#e65100">仍收不到？</b><br>
-        检查：系统设置 → 通知管理 → 浏览器/Chrome → 允许通知
+    <div style="background:#fff;border-radius:16px;max-width:430px;width:100%;max-height:90vh;overflow-y:auto;padding:22px 20px">
+      <div style="font-size:18px;font-weight:700;margin-bottom:6px">🔔 推送无法开启</div>
+      <div style="font-size:13px;color:#888;margin-bottom:8px">检测到：${bname}${env.isStandalone ? '（主屏幕模式）' : ''}</div>
+      <div style="font-size:13px;line-height:1.9">
+        HTTPS 安全连接：${env.isSecure ? '✅' : '❌'}<br>
+        通知能力：${env.notification ? '✅' : '❌'}<br>
+        后台服务能力：${env.sw ? '✅' : '❌'}<br>
+        <b>推送通道（PushManager）：${env.push ? '✅' : '❌ 不支持'}</b><br>
+        通知权限：${env.permission === 'granted' ? '✅ 已允许' : env.permission === 'denied' ? '❌ 已拒绝' : '➖ 未授权'}
+      </div>
+      ${failLine}
+      <div style="font-size:14px;line-height:1.7;color:#333;margin-top:12px">
+        ${(!env.push || (result && result.stage === '向浏览器申请推送通道')) ? `
+          <b style="color:#e65100">这是浏览器限制，不是设置问题。</b><br>
+          ${bname}没有接入网页推送服务，即使打开通知权限也无法后台推送。请按以下顺序尝试：<br><br>
+          <b>① 使用 Chrome 浏览器</b>（最可靠）<br>
+          复制本站网址，用 <b>Chrome</b> 打开，登录后点「🔔 开启打卡推送提醒」。<br>
+          <span style="color:#888;font-size:12px">注：华为等无谷歌服务的手机，Chrome 推送也可能不可用。</span><br><br>
+          <b>② 添加到主屏幕</b><br>
+          在 Chrome 菜单中选择「添加到主屏幕 / 安装应用」，从桌面图标进入后再开启。<br><br>
+          <b>③ 兜底方式</b><br>
+          保持打卡页面在后台打开，应用每 30 秒自动刷新一次，补卡等消息仍会在页面内提示。
+        ` : `
+          <b style="color:#4f46e5">请先允许通知权限：</b><br>
+          点网址左边的 <b>🔒 小锁图标</b> → 权限/网站设置 → 通知 → <b>允许</b>，然后关闭本弹窗再点一次开启按钮。<br><br>
+          若仍失败，请尝试用 Chrome 打开本站。
+        `}
       </div>
       <button id="push-help-close" style="margin-top:16px;width:100%;padding:12px;border:none;border-radius:10px;background:#4f46e5;color:#fff;font-size:15px;font-weight:600">我知道了</button>
     </div>`;
-  document.body.appendChild(mask);
-  mask.addEventListener('click', (e) => { if (e.target === mask || e.target.id === 'push-help-close') mask.classList.add('hidden'); });
+  mask.classList.remove('hidden');
+  mask.onclick = (e) => { if (e.target === mask || e.target.id === 'push-help-close') mask.classList.add('hidden'); };
+}
+
+// 兼容旧调用：仅权限问题时展示帮助
+function showPushHelp(env) {
+  showPushDiag(env || diagnosePushEnv(), null);
 }
 
 function updatePushButton() {
