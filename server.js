@@ -811,7 +811,7 @@ app.post('/api/checkins', async (req, res) => {
     const todayStart = cnDayStart(Date.now());
     const dup = await pool.query(
       'SELECT id FROM checkins WHERE group_id = $1 AND user_name = $2 AND punch_type = $3 AND created_at >= $4 LIMIT 1',
-      [g.id, userName.trim(), punchType, todayStart.getTime()]
+      [g.id, userName.trim(), punchType, todayStart]
     );
     const info = await pool.query(
       `INSERT INTO checkins (group_id, user_name, lat, lng, address, accuracy, punch_type, created_at)
