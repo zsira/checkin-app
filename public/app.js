@@ -650,7 +650,7 @@ async function enablePush() {
     let perm = Notification.permission;
     if (perm === 'default') perm = await Notification.requestPermission();
     if (perm !== 'granted') {
-      alert('通知权限未开启。\n\n请在浏览器设置中允许本站通知，再回来点击此按钮。');
+      showPushHelp();
       updatePushButton();
       return;
     }
@@ -659,6 +659,34 @@ async function enablePush() {
   } catch (e) {
     toast('开启失败：' + (e.message || '未知错误'));
   }
+}
+
+function showPushHelp() {
+  let mask = document.getElementById('push-help-mask');
+  if (mask) { mask.classList.remove('hidden'); return; }
+  mask = document.createElement('div');
+  mask.id = 'push-help-mask';
+  mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px';
+  mask.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:420px;width:100%;max-height:88vh;overflow-y:auto;padding:22px 20px">
+      <div style="font-size:18px;font-weight:700;margin-bottom:12px">🔔 如何开启通知</div>
+      <div style="font-size:14px;line-height:1.7;color:#333">
+        <b style="color:#4f46e5">方法一：点地址栏小锁（推荐）</b><br>
+        1. 点网址左边的 <b>🔒 锁形图标</b><br>
+        2. 选择「权限 / 网站设置」<br>
+        3. 将「通知」改为 <b>允许</b><br>
+        4. 刷新页面，再点一次开启按钮<br><br>
+        <b style="color:#4f46e5">方法二：浏览器菜单</b><br>
+        菜单(≡) → 设置 → 隐私/网站设置 → 通知 → 找到本站 → 允许<br><br>
+        <b style="color:#e65100">国产浏览器找不到选项？</b><br>
+        vivo/OPPO/小米等自带浏览器可能不支持网页推送，请用 <b>Chrome</b> 打开本站，或点「📲 安装」添加到主屏幕后从桌面图标进入。<br><br>
+        <b style="color:#e65100">仍收不到？</b><br>
+        检查：系统设置 → 通知管理 → 浏览器/Chrome → 允许通知
+      </div>
+      <button id="push-help-close" style="margin-top:16px;width:100%;padding:12px;border:none;border-radius:10px;background:#4f46e5;color:#fff;font-size:15px;font-weight:600">我知道了</button>
+    </div>`;
+  document.body.appendChild(mask);
+  mask.addEventListener('click', (e) => { if (e.target === mask || e.target.id === 'push-help-close') mask.classList.add('hidden'); });
 }
 
 function updatePushButton() {
