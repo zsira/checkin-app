@@ -449,80 +449,131 @@ function reverseGeocode(lat, lng) {
   });
 }
 
-// 正向地理编码（地址 -> 坐标）
-function geocode(address) {
-  return new Promise((resolve) => {
-    if (!address) return resolve(null);
-
-    // 1. 高德地图
-    if (AMAP_KEY) {
-      const url = `https://restapi.amap.com/v3/geocode/geo?key=${AMAP_KEY}&address=${encodeURIComponent(address)}&output=json`;
-      https.get(url, { agent: proxyAgent, timeout: 6000 }, (res) => {
-        let data = '';
-        res.on('data', c => data += c);
-        res.on('end', () => {
-          try {
-            const j = JSON.parse(data);
-            if (j.status === '1' && j.geocodes && j.geocodes.length > 0) {
-              const loc = j.geocodes[0].location.split(',');
-              return resolve({ lat: parseFloat(loc[1]), lng: parseFloat(loc[0]), address: j.geocodes[0].formatted_address || address });
-            }
-          } catch {}
-          resolve(null);
-        });
-      }).on('error', () => resolve(null)).on('timeout', function() { this.destroy(); resolve(null); });
-      return;
-    }
-
-    // 2. 天地图
-    if (TIANDITU_KEY) {
-      const ds = JSON.stringify({ keyWord: address, level: 12, mapBound: '-180,-90,180,90', queryType: 7, start: 0, count: 1 });
-      const url = `https://api.tianditu.gov.cn/v2/search?postStr=${encodeURIComponent(ds)}&type=query&tk=${TIANDITU_KEY}`;
-      https.get(url, { agent: proxyAgent, timeout: 6000 }, (res) => {
-        let data = '';
-        res.on('data', c => data += c);
-        res.on('end', () => {
-          try {
-            const j = JSON.parse(data);
-            if (j.coverages && j.coverages.length > 0 && j.coverages[0].Position) {
-              const [lng, lat] = j.coverages[0].Position.split(' ');
-              return resolve({ lat: parseFloat(lat), lng: parseFloat(lng), address: j.coverages[0].name || address });
-            }
-          } catch {}
-          resolve(null);
-        });
-      }).on('error', () => resolve(null)).on('timeout', function() { this.destroy(); resolve(null); });
-      return;
-    }
-
-    // 3. 降级：Open-Meteo（免 key，支持中文）
-    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(address)}&count=1&language=zh&format=json`;
-    https.get(url, { agent: proxyAgent, timeout: 8000, headers: { 'User-Agent': 'checkin-app/1.0' } }, (res) => {
+// 简单 HTTPS GET JSON 工具（带代理、超时）
+function httpGetJson(url, { timeout = 7000, headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      agent: proxyAgent,
+      timeout,
+      headers: { 'User-Agent': 'checkin-app/1.0', ...headers },
+    }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
-        try {
-          const j = JSON.parse(data);
-          if (j.results && j.results.length > 0) {
-            const r = j.results[0];
-            const addr = [r.admin1, r.admin2, r.name].filter(Boolean).join(' ') || address;
-            return resolve({ lat: r.latitude, lng: r.longitude, address: addr });
-          }
-        } catch {}
-        resolve(null);
+        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
       });
-    }).on('error', () => resolve(null)).on('timeout', function() { this.destroy(); resolve(null); });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
   });
 }
 
-// 管理后台：地址转坐标
+// 关键词搜索位置（支持公司名/店铺/楼宇/地址），返回多个候选
+// 结果格式：{ provider, results: [{ name, address, lat, lng }] }
+async function geocodeCandidates(keyword) {
+  const kw = (keyword || '').trim();
+  if (!kw) return { provider: 'none', results: [] };
+
+  // 1. 高德：POI 关键词搜索（公司名最准），无结果时降级到地址地理编码
+  if (AMAP_KEY) {
+    try {
+      const poiUrl = `https://restapi.amap.com/v3/place/text?key=${AMAP_KEY}&keywords=${encodeURIComponent(kw)}&offset=8&page=1&extensions=base&output=json`;
+      const j = await httpGetJson(poiUrl, { timeout: 6000 });
+      const pois = (j.status === '1' && Array.isArray(j.pois)) ? j.pois : [];
+      const results = pois
+        .filter(p => p.location && p.location.includes(','))
+        .map(p => {
+          const [lng, lat] = p.location.split(',');
+          const region = [p.pname, p.cityname, p.adname].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join('');
+          return {
+            name: p.name || kw,
+            address: [region, p.address].filter(Boolean).join(' ') || p.name || kw,
+            lat: parseFloat(lat), lng: parseFloat(lng),
+          };
+        });
+      if (results.length > 0) return { provider: 'amap', results };
+    } catch {}
+    try {
+      const geoUrl = `https://restapi.amap.com/v3/geocode/geo?key=${AMAP_KEY}&address=${encodeURIComponent(kw)}&output=json`;
+      const j = await httpGetJson(geoUrl, { timeout: 6000 });
+      const list = (j.status === '1' && Array.isArray(j.geocodes)) ? j.geocodes : [];
+      const results = list
+        .filter(g => g.location && g.location.includes(','))
+        .slice(0, 8)
+        .map(g => {
+          const [lng, lat] = g.location.split(',');
+          return { name: g.formatted_address || kw, address: g.formatted_address || kw, lat: parseFloat(lat), lng: parseFloat(lng) };
+        });
+      if (results.length > 0) return { provider: 'amap', results };
+    } catch {}
+  }
+
+  // 2. 天地图：地名/POI 搜索
+  if (TIANDITU_KEY) {
+    try {
+      const ds = JSON.stringify({ keyWord: kw, level: 12, mapBound: '-180,-90,180,90', queryType: 7, start: 0, count: 8 });
+      const url = `https://api.tianditu.gov.cn/v2/search?postStr=${encodeURIComponent(ds)}&type=query&tk=${TIANDITU_KEY}`;
+      const j = await httpGetJson(url, { timeout: 6000 });
+      const results = (j.coverages || [])
+        .filter(c => c.Position)
+        .map(c => {
+          const [lng, lat] = String(c.Position).trim().split(/\s+/);
+          return { name: c.name || kw, address: c.address || c.name || kw, lat: parseFloat(lat), lng: parseFloat(lng) };
+        });
+      if (results.length > 0) return { provider: 'tianditu', results };
+    } catch {}
+  }
+
+  // 3. OpenStreetMap Nominatim（免 key，可搜公司/POI，限定中国，遵守其调用频率策略）
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(kw)}&format=jsonv2&limit=8&accept-language=zh-CN&countrycodes=cn`;
+    const list = await httpGetJson(url, { timeout: 7000, headers: { 'User-Agent': 'checkin-app/1.0 (contact: admin@checkin.app)' } });
+    const results = (Array.isArray(list) ? list : []).map(r => {
+      const parts = String(r.display_name || '').split(',').map(s => s.trim()).filter(Boolean);
+      return {
+        name: parts[0] || kw,
+        address: parts.slice(1).join(' ') || r.display_name || kw,
+        lat: parseFloat(r.lat), lng: parseFloat(r.lon),
+      };
+    });
+    if (results.length > 0) return { provider: 'nominatim', results };
+  } catch {}
+
+  // 4. 兜底：Open-Meteo（免 key，仅城市/区县级别）
+  try {
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(kw)}&count=8&language=zh&format=json&country=CN`;
+    const j = await httpGetJson(url, { timeout: 8000 });
+    const results = (j.results || []).map(r => ({
+      name: r.name || kw,
+      address: [r.admin1, r.admin2, r.admin3, r.name].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' ') || kw,
+      lat: r.latitude, lng: r.longitude,
+    }));
+    if (results.length > 0) return { provider: 'openmeteo', results };
+  } catch {}
+
+  return { provider: 'none', results: [] };
+}
+
+// 正向地理编码（兼容旧调用：取第一个候选）
+async function geocode(address) {
+  const r = await geocodeCandidates(address);
+  if (!r.results.length) return null;
+  const top = r.results[0];
+  return { lat: top.lat, lng: top.lng, address: top.address || top.name, provider: r.provider, results: r.results };
+}
+
+// 管理后台：公司名/地址 -> 候选坐标列表
 app.get('/api/admin/geocode', auth, async (req, res) => {
   try {
     const address = (req.query.address || '').trim();
-    if (!address) return res.status(400).json({ error: '请输入地址' });
-    const result = await geocode(address);
-    if (!result) return res.status(404).json({ error: '未找到该地址的坐标，请尝试更详细的地址' });
-    res.json(result);
+    if (address.length < 2) return res.status(400).json({ error: '请至少输入 2 个字' });
+    const result = await geocodeCandidates(address);
+    if (!result.results.length) {
+      return res.status(404).json({
+        error: '未找到该公司或地址，请尝试完整名称（如"东莞市XX公司"）或更详细的地址；也可直接点"使用当前位置"',
+      });
+    }
+    res.json({ provider: result.provider, results: result.results });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

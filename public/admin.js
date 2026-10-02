@@ -76,8 +76,9 @@ function init() {
   $('btn-create-group').onclick = openCreateGroup;
   $('cg-cancel').onclick = closeCreateGroup;
   $('cg-save').onclick = createGroup;
-  $('cg-loc-btn').onclick = () => useCurrentLocation('cg-lat', 'cg-lng', 'cg-addr-result');
-  $('cg-geo-btn').onclick = () => geocodeAddress('cg-addr', 'cg-lat', 'cg-lng', 'cg-addr-result');
+  $('cg-loc-btn').onclick = () => useCurrentLocation('cg-lat', 'cg-lng', 'cg-addr-result', 'cg-addr-picks');
+  $('cg-geo-btn').onclick = () => geocodeAddress('cg-addr', 'cg-lat', 'cg-lng', 'cg-addr-result', 'cg-addr-picks');
+  bindAddressAutoSearch('cg-addr', 'cg-lat', 'cg-lng', 'cg-addr-result', 'cg-addr-picks');
 
   // 邀请
   $('invite-close').onclick = closeInvite;
@@ -713,15 +714,16 @@ function editGroup(id) {
   $('modal-fields').innerHTML = `
     <div class="field"><label>群组名称</label><input id="ef-name" value="${esc(g.name)}"></div>
     <div class="field">
-      <label>📍 定位或地址识别</label>
+      <label>📍 公司位置（输入公司名自动定位，或使用当前位置）</label>
       <div style="display:flex;gap:8px">
-        <button type="button" class="btn-save" onclick="useCurrentLocation('ef-lat','ef-lng','ef-addr-result')" style="flex:1;padding:10px;font-size:13px">使用当前位置</button>
+        <button type="button" class="btn-save" onclick="useCurrentLocation('ef-lat','ef-lng','ef-addr-result','ef-addr-picks')" style="flex:1;padding:10px;font-size:13px">📍 使用当前位置</button>
       </div>
       <div style="display:flex;gap:8px;margin-top:8px">
-        <input id="ef-addr" type="text" placeholder="输入地址自动识别坐标" style="flex:1;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;outline:none;box-sizing:border-box">
-        <button type="button" class="btn-save" onclick="geocodeAddress('ef-addr','ef-lat','ef-lng','ef-addr-result')" style="flex:none;padding:10px 14px;font-size:13px">识别</button>
+        <input id="ef-addr" type="text" placeholder="输入公司名/地址，如：东莞市奥能电子有限公司" style="flex:1;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;outline:none;box-sizing:border-box">
+        <button type="button" class="btn-save" onclick="geocodeAddress('ef-addr','ef-lat','ef-lng','ef-addr-result','ef-addr-picks')" style="flex:none;padding:10px 14px;font-size:13px">搜索</button>
       </div>
-      <div id="ef-addr-result" style="font-size:12px;color:var(--success);margin-top:4px;min-height:16px"></div>
+      <div id="ef-addr-result" style="font-size:12px;color:var(--muted);margin-top:6px;min-height:16px"></div>
+      <div id="ef-addr-picks"></div>
     </div>
     <div class="field"><label>中心点纬度（不限制留空）</label><input id="ef-lat" value="${g.center_lat ?? ''}" placeholder="如 22.951"></div>
     <div class="field"><label>中心点经度（不限制留空）</label><input id="ef-lng" value="${g.center_lng ?? ''}" placeholder="如 113.877"></div>
@@ -733,6 +735,8 @@ function editGroup(id) {
     </div>
   `;
   $('edit-modal').classList.remove('hidden');
+  // 输入公司名/地址防抖自动搜索（弹窗内容每次重新渲染，元素为新建，可安全绑定）
+  bindAddressAutoSearch('ef-addr', 'ef-lat', 'ef-lng', 'ef-addr-result', 'ef-addr-picks');
 }
 
 function renderTimeRow(i, t) {
@@ -986,8 +990,9 @@ function closeCreateGroup() {
 }
 
 // ---------- 定位与地址识别 ----------
-function useCurrentLocation(latId, lngId, resultId) {
+function useCurrentLocation(latId, lngId, resultId, picksId) {
   const resultEl = $(resultId);
+  if (picksId && $(picksId)) $(picksId).innerHTML = '';
   resultEl.style.color = 'var(--muted)';
   resultEl.textContent = '正在获取定位...';
   if (!window.isSecureContext) {
@@ -1004,8 +1009,9 @@ function useCurrentLocation(latId, lngId, resultId) {
     (pos) => {
       $(latId).value = pos.coords.latitude.toFixed(6);
       $(lngId).value = pos.coords.longitude.toFixed(6);
+      if (picksId && $(picksId)) $(picksId).innerHTML = '';
       resultEl.style.color = 'var(--success)';
-      resultEl.textContent = `已定位：${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)}（精度 ${Math.round(pos.coords.accuracy)}m）`;
+      resultEl.textContent = `✓ 已定位当前位置（精度 ${Math.round(pos.coords.accuracy)}m），坐标已自动填入`;
     },
     (err) => {
       resultEl.style.color = 'var(--danger)';
@@ -1018,32 +1024,82 @@ function useCurrentLocation(latId, lngId, resultId) {
   );
 }
 
-async function geocodeAddress(addrId, latId, lngId, resultId) {
-  const address = $(addrId).value.trim();
+// 公司名/地址搜索：返回候选列表供点选
+let geoSearchSeq = 0;
+async function searchAddress(addrId, latId, lngId, resultId, picksId) {
+  const keyword = $(addrId).value.trim();
   const resultEl = $(resultId);
-  if (!address) {
+  const picksEl = picksId ? $(picksId) : null;
+  if (picksEl) picksEl.innerHTML = '';
+  if (keyword.length < 2) {
     resultEl.style.color = 'var(--danger)';
-    resultEl.textContent = '请先输入地址';
+    resultEl.textContent = '请至少输入 2 个字';
     return;
   }
+  const seq = ++geoSearchSeq;
   resultEl.style.color = 'var(--muted)';
-  resultEl.textContent = '正在识别地址...';
+  resultEl.textContent = '正在搜索位置...';
   try {
-    const res = await fetch('/api/admin/geocode?address=' + encodeURIComponent(address), { headers: authHeaders() });
+    const res = await fetch('/api/admin/geocode?address=' + encodeURIComponent(keyword), { headers: authHeaders() });
     const data = await res.json();
+    if (seq !== geoSearchSeq) return; // 已有更新的搜索，丢弃过期结果
     if (!res.ok) {
       resultEl.style.color = 'var(--danger)';
-      resultEl.textContent = data.error || '识别失败';
+      resultEl.textContent = data.error || '未找到';
       return;
     }
-    $(latId).value = data.lat.toFixed(6);
-    $(lngId).value = data.lng.toFixed(6);
+    const items = data.results || [];
     resultEl.style.color = 'var(--success)';
-    resultEl.textContent = `已识别：${data.address || address}`;
+    resultEl.textContent = `找到 ${items.length} 个结果，请点选正确的位置：`;
+    if (!picksEl) {
+      pickAddress(items[0], latId, lngId, resultEl, picksEl);
+      return;
+    }
+    picksEl.innerHTML = items.map((it, i) => `
+      <div data-i="${i}" style="border:1px solid var(--border);border-radius:8px;padding:9px 11px;margin-top:7px;font-size:13px;cursor:pointer;background:#fafafa">
+        <div style="font-weight:600;color:#222">📍 ${esc(it.name)}</div>
+        <div style="color:var(--muted);font-size:12px;margin-top:2px">${esc(it.address || '')}</div>
+      </div>
+    `).join('');
+    picksEl.querySelectorAll('[data-i]').forEach(el => {
+      el.onclick = () => pickAddress(items[Number(el.dataset.i)], latId, lngId, resultEl, picksEl);
+    });
   } catch (e) {
+    if (seq !== geoSearchSeq) return;
     resultEl.style.color = 'var(--danger)';
-    resultEl.textContent = '网络错误';
+    resultEl.textContent = '网络错误，请重试';
   }
+}
+
+function pickAddress(it, latId, lngId, resultId, picksId) {
+  $(latId).value = it.lat.toFixed(6);
+  $(lngId).value = it.lng.toFixed(6);
+  const resultEl = $(resultId);
+  resultEl.style.color = 'var(--success)';
+  resultEl.textContent = `✓ 已定位：${it.name}（${it.lat.toFixed(6)}, ${it.lng.toFixed(6)}）`;
+  if (picksId && $(picksId)) $(picksId).innerHTML = '';
+}
+
+// 输入防抖自动搜索
+function bindAddressAutoSearch(addrId, latId, lngId, resultId, picksId) {
+  const el = $(addrId);
+  if (!el || el._autoBound) return;
+  el._autoBound = true;
+  let timer = null;
+  el.addEventListener('input', () => {
+    clearTimeout(timer);
+    const kw = el.value.trim();
+    const resultEl = $(resultId);
+    if (picksId) $(picksId).innerHTML = '';
+    if (kw.length < 2) { resultEl.textContent = ''; return; }
+    resultEl.style.color = 'var(--muted)';
+    resultEl.textContent = '输入中...';
+    timer = setTimeout(() => searchAddress(addrId, latId, lngId, resultId, picksId), 700);
+  });
+}
+
+async function geocodeAddress(addrId, latId, lngId, resultId, picksId) {
+  return searchAddress(addrId, latId, lngId, resultId, picksId);
 }
 
 async function createGroup() {
