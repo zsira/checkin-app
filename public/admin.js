@@ -121,6 +121,8 @@ function init() {
 function showLogin() {
   $('login-screen').classList.remove('hidden');
   $('admin-content').classList.add('hidden');
+  const panel = $('panel-admins');
+  if (panel) panel.style.display = 'none';
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
 }
 
@@ -131,6 +133,17 @@ function showAdmin() {
   updateAdminPushButton();
   syncAdminPush(); // 已授权则自动静默订阅
   registerAdminSyncFallback(); // 兜底定时通道（安装到桌面后生效）
+  applySuperOnlyUI();
+}
+
+// 仅超级管理员可见的 UI（管理员管理面板等）
+function applySuperOnlyUI() {
+  const panel = $('panel-admins');
+  if (panel) panel.style.display = (currentAdmin && currentAdmin.is_super) ? '' : 'none';
+}
+
+function isSuperAdmin() {
+  return !!(currentAdmin && currentAdmin.is_super);
 }
 
 // ---------- Web Push（接收成员请假等后台推送） ----------
@@ -284,13 +297,9 @@ async function loadAll() {
     renderLeaves();
     renderGroups();
     renderPersons();
-    // 超管功能
-    if (currentAdmin && currentAdmin.is_super) {
-      $('panel-admins').style.display = '';
-      loadAdmins();
-    } else {
-      $('panel-admins').style.display = 'none';
-    }
+    // 超管专属：管理员管理（普通管理员完全不可见，且不会发起请求）
+    applySuperOnlyUI();
+    if (isSuperAdmin()) loadAdmins();
     return true;
   } catch (e) {
     console.error(e);
@@ -838,10 +847,12 @@ async function changePassword() {
   }
 }
 
-// ---------- 管理员管理 ----------
+// ---------- 管理员管理（仅超级管理员） ----------
 async function loadAdmins() {
+  if (!isSuperAdmin()) return;
   try {
     const res = await fetch('/api/admin/admins', { headers: authHeaders() });
+    if (res.status === 403) return; // 双保险：后端拒绝时静默
     if (!res.ok) return;
     const admins = await res.json();
     $('admins-body').innerHTML = admins.map(a => `
@@ -855,6 +866,7 @@ async function loadAdmins() {
   } catch (e) {}
 }
 function openAdminModal() {
+  if (!isSuperAdmin()) return;
   $('adm-username').value = '';
   $('adm-password').value = '';
   $('adm-error').textContent = '';
@@ -864,6 +876,7 @@ function closeAdminModal() {
   $('admin-modal').classList.add('hidden');
 }
 async function addAdmin() {
+  if (!isSuperAdmin()) return;
   const username = $('adm-username').value.trim();
   const password = $('adm-password').value.trim();
   $('adm-error').textContent = '';
@@ -885,6 +898,7 @@ async function addAdmin() {
   }
 }
 async function delAdmin(id, name) {
+  if (!isSuperAdmin()) return;
   if (!confirm(`确定删除管理员「${name}」？`)) return;
   await fetch('/api/admin/admins/' + id, { method: 'DELETE', headers: authHeaders() });
   loadAdmins();
