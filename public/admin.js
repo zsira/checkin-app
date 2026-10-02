@@ -12,6 +12,27 @@ let currentAdmin = null; // { username, is_super }
 let refreshTimer = null;
 let editing = null; // { type: 'group'|'checkin', id, data }
 
+// 四个固定打卡时段
+const PUNCH_SLOTS = [
+  { type: 0, short: '早上班', name: '早上上班卡', time: '07:30', icon: '🌅' },
+  { type: 1, short: '午下班', name: '中午下班卡', time: '12:00', icon: '🍱' },
+  { type: 2, short: '午上班', name: '下午上班卡', time: '13:30', icon: '☀️' },
+  { type: 3, short: '晚下班', name: '下午下班卡', time: '18:00', icon: '🌙' },
+];
+function punchSlotOf(r) {
+  if (r.punch_type != null) return Number(r.punch_type);
+  const d = new Date(Number(r.created_at));
+  const mins = d.getHours() * 60 + d.getMinutes();
+  if (mins < 9 * 60 + 45) return 0;
+  if (mins < 12 * 60 + 45) return 1;
+  if (mins < 15 * 60 + 45) return 2;
+  return 3;
+}
+function dayKeyOf(ts) {
+  const d = new Date(Number(ts));
+  return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+}
+
 // ---------- 初始化 ----------
 function init() {
   // 防截屏：禁用右键、复制（输入框/文本域内不禁用，保证可正常编辑删除）
@@ -71,6 +92,12 @@ function init() {
   };
   $('rest-cancel').onclick = closeRestModal;
   $('rest-confirm').onclick = confirmRest;
+
+  // 人员详情弹窗
+  $('person-modal-close').onclick = () => { $('person-modal').classList.add('hidden'); currentPersonKey = ''; };
+  $('person-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'person-modal') { $('person-modal').classList.add('hidden'); currentPersonKey = ''; }
+  });
 
   $('filter-person').addEventListener('input', () => { renderPersons(); });
 }
@@ -232,6 +259,22 @@ function renderGroups() {
   }).join('');
 }
 
+function todayDots(p) {
+  const done = new Set(p.today_slots || []);
+  return PUNCH_SLOTS.map(s => {
+    const ok = done.has(s.type);
+    return `<span title="${s.name} ${s.time}" style="display:inline-block;min-width:20px;text-align:center;font-size:13px;opacity:${ok ? '1' : '0.3'}">${ok ? '✅' : s.icon}</span>`;
+  }).join('');
+}
+
+function statusBadge(p) {
+  if (p.on_leave_today) return '<span style="background:#fff3e0;color:#e65100;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600">📝 请假中</span>';
+  const n = (p.today_slots || []).length;
+  if (n >= 4) return '<span style="background:#e8f5e9;color:#2e7d32;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600">✓ 今日已满卡</span>';
+  if (n > 0) return `<span style="background:#eef2ff;color:#4f46e5;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600">今日已打${n}/4</span>`;
+  return '<span style="background:#f5f5f5;color:#999;padding:3px 10px;border-radius:10px;font-size:12px">今日未打卡</span>';
+}
+
 function renderPersons() {
   const fp = $('filter-person')?.value.trim().toLowerCase() || '';
   let persons = memberStats.slice();
@@ -253,37 +296,134 @@ function renderPersons() {
   });
 
   container.innerHTML = Array.from(groupMap.values()).map(g => {
-    const rows = g.members
-      .sort((a, b) => b.checkin_days - a.checkin_days || b.total_checkins - a.total_checkins)
-      .map(p => `
-        <tr>
-          <td><b>${esc(p.user_name)}</b></td>
-          <td>${p.checkin_days} 天</td>
-          <td><b style="color:#4f46e5">${p.full_days || 0} 天</b></td>
-          <td><b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days} 天</b></td>
-          <td style="color:#e67e22">${p.leave_days || 0} 天</td>
-          <td>${p.total_checkins} 次</td>
-          <td><button class="btn-del" onclick="delPerson('${esc(p.user_name).replace(/'/g, "\\'")}')">清除记录</button></td>
-        </tr>`).join('');
+    const cards = g.members
+      .sort((a, b) => (b.today_slots || []).length - (a.today_slots || []).length || b.checkin_days - a.checkin_days)
+      .map(p => {
+        const initial = (p.user_name || '?').charAt(0).toUpperCase();
+        const args = `'${esc(p.group_code).replace(/'/g, "\\'")}','${esc(p.user_name).replace(/'/g, "\\'")}'`;
+        return `
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;margin-bottom:8px;flex-wrap:wrap">
+          <div style="width:40px;height:40px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">${esc(initial)}</div>
+          <div style="flex:1;min-width:150px">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <a href="javascript:void(0)" onclick="openPerson(${args})" style="color:var(--primary);font-weight:700;font-size:15px;text-decoration:none">${esc(p.user_name)}</a>
+              ${statusBadge(p)}
+            </div>
+            <div style="margin-top:4px;font-size:13px;color:var(--muted)">
+              今日 ${todayDots(p)}
+              <span style="margin-left:8px">打卡${p.checkin_days}天 · 完整卡<b style="color:#4f46e5">${p.full_days || 0}</b> · 缺卡<b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days}</b> · 请假<span style="color:#e67e22">${p.leave_days || 0}</span> · 共${p.total_checkins}次</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button class="btn-edit" onclick="openPerson(${args})">📋 记录</button>
+            <button class="btn-del" onclick="delPerson(${args})">清除</button>
+          </div>
+        </div>`;
+      }).join('');
     return `
       <div style="margin-bottom:20px">
-        <h3 style="font-size:15px;margin-bottom:8px;color:var(--primary)">${esc(g.group_name)} <span class="tag">${esc(g.group_code)}</span></h3>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>人员</th><th>打卡天数</th><th>完整卡天数</th><th>缺卡天数</th><th>请假天数</th><th>总计</th><th>操作</th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
+        <h3 style="font-size:15px;margin-bottom:8px;color:var(--primary)">${esc(g.group_name)} <span class="tag">${esc(g.group_code)}</span>（${g.members.length}人）</h3>
+        ${cards}
       </div>`;
   }).join('');
 }
 
-async function delPerson(name) {
-  if (!confirm(`确定清除「${name}」的所有打卡记录？`)) return;
-  const ids = allCheckins.filter(c => c.user_name === name).map(c => c.id);
-  for (const id of ids) {
-    await fetch('/api/admin/checkins/' + id, { method: 'DELETE', headers: authHeaders() });
+// ---------- 人员详情弹窗 ----------
+let currentPersonKey = '';
+
+async function openPerson(code, user) {
+  currentPersonKey = code + '|' + user;
+  const p = memberStats.find(m => m.group_code === code && m.user_name === user);
+  $('person-modal-title').textContent = '👤 ' + user;
+  $('person-modal-group').textContent = p ? `${p.group_name}（${p.group_code}）` : code;
+  // 统计徽标
+  $('person-modal-stats').innerHTML = p ? [
+    `打卡 <b>${p.checkin_days}</b> 天`,
+    `完整卡 <b style="color:#4f46e5">${p.full_days || 0}</b> 天`,
+    `缺卡 <b style="color:${p.absent_days > 0 ? 'var(--danger)' : 'var(--success)'}">${p.absent_days}</b> 天`,
+    `请假 <b style="color:#e67e22">${p.leave_days || 0}</b> 天`,
+    `共 <b>${p.total_checkins}</b> 次`,
+  ].map(t => `<span style="background:#f7f8fa;border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:13px">${t}</span>`).join('') : '';
+  // 今日四卡种
+  const done = new Set(p ? (p.today_slots || []) : []);
+  $('person-modal-today').innerHTML = PUNCH_SLOTS.map(s => {
+    const ok = done.has(s.type);
+    return `<div style="flex:1;text-align:center;padding:8px 2px;border-radius:10px;font-size:12px;background:${ok ? '#e8f5e9' : '#f5f5f5'};color:${ok ? '#2e7d32' : '#999'};border:1px solid ${ok ? '#a5d6a7' : '#eee'}">
+      <div style="font-size:16px">${ok ? '✅' : s.icon}</div>
+      <div style="margin-top:2px;font-weight:600">${s.short}</div><div>${s.time}</div>
+    </div>`;
+  }).join('');
+  $('person-records').innerHTML = '<div style="color:var(--muted);text-align:center;padding:20px">加载中...</div>';
+  $('person-modal').classList.remove('hidden');
+
+  try {
+    const res = await fetch('/api/admin/persons/checkins?code=' + encodeURIComponent(code) + '&user=' + encodeURIComponent(user), { headers: authHeaders() });
+    const rows = await res.json();
+    if (!res.ok) throw new Error(rows.error);
+    renderPersonRecords(rows);
+  } catch (e) {
+    $('person-records').innerHTML = '<div style="color:var(--danger);padding:16px">加载失败：' + esc(e.message) + '</div>';
   }
+}
+
+function renderPersonRecords(rows) {
+  const box = $('person-records');
+  if (!rows.length) {
+    box.innerHTML = '<div style="color:var(--muted);text-align:center;padding:20px">暂无打卡记录</div>';
+    return;
+  }
+  // 按日期分组
+  const dayMap = new Map();
+  rows.forEach(r => {
+    const k = dayKeyOf(r.created_at);
+    if (!dayMap.has(k)) dayMap.set(k, []);
+    dayMap.get(k).push(r);
+  });
+  box.innerHTML = Array.from(dayMap.entries()).map(([day, list]) => {
+    const slots = new Set(list.map(punchSlotOf));
+    const full = slots.size >= 4;
+    const d = new Date(Number(list[0].created_at));
+    const dateStr = `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()}`;
+    const items = list.map(r => {
+      const s = PUNCH_SLOTS[punchSlotOf(r)];
+      const t = new Date(Number(r.created_at));
+      const hm = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
+      const loc = r.lat != null ? `<a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank" style="color:var(--primary)">${r.address ? esc(r.address) : '📍 地图位置'}</a>` : '';
+      return `
+        <div style="display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #f5f5f5">
+          <div style="width:56px;font-weight:600;font-size:13px;color:var(--primary)">${s.icon} ${hm}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px">${s.name}</div>
+            <div style="font-size:12px;color:var(--muted)">${loc}${r.accuracy ? ` · 精度${Math.round(r.accuracy)}m` : ''}</div>
+          </div>
+          <button class="btn-del" onclick="delCheckinRefresh(${r.id})">删除</button>
+        </div>`;
+    }).join('');
+    return `
+      <div style="margin-bottom:14px">
+        <div style="font-weight:700;font-size:13px;margin-bottom:4px;display:flex;justify-content:space-between">
+          <span>${dateStr} ${full ? '<span style="color:#2e7d32;font-weight:600">✓ 完整卡</span>' : `<span style="color:#e67e22">${slots.size}/4 卡</span>`}</span>
+        </div>
+        ${items}
+      </div>`;
+  }).join('');
+}
+
+async function delCheckinRefresh(id) {
+  if (!confirm('确定删除这条打卡记录？')) return;
+  await fetch('/api/admin/checkins/' + id, { method: 'DELETE', headers: authHeaders() });
+  await loadAll();
+  if (currentPersonKey) {
+    const [code, user] = currentPersonKey.split('|');
+    openPerson(code, user);
+  }
+}
+
+async function delPerson(code, user) {
+  if (!confirm(`确定清除「${user}」在该群组的所有打卡记录？`)) return;
+  await fetch('/api/admin/persons/checkins?code=' + encodeURIComponent(code) + '&user=' + encodeURIComponent(user), {
+    method: 'DELETE', headers: authHeaders(),
+  });
   loadAll();
 }
 

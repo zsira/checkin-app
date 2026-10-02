@@ -695,17 +695,20 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
     });
 
     const dk = (ts) => dayKey(ts);
+    const todayK = dayKey(Date.now());
     const map = new Map();
     rows.rows.forEach(r => {
       const key = r.group_code + '|' + r.user_name;
       if (!map.has(key)) {
-        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), totalCheckins: 0, first: r.created_at, last: r.created_at });
+        map.set(key, { user_name: r.user_name, group_name: r.group_name, group_code: r.group_code, days: new Map(), todaySlots: new Set(), totalCheckins: 0, first: r.created_at, last: r.created_at });
       }
       const p = map.get(key);
       const d = dk(r.created_at);
+      const slot = slotOf(r);
       // 每天记录已打卡的时段集合（同天同时段多次打卡只算一次）
       if (!p.days.has(d)) p.days.set(d, new Set());
-      p.days.get(d).add(slotOf(r));
+      p.days.get(d).add(slot);
+      if (d === todayK) p.todaySlots.add(slot);
       p.totalCheckins++;
       if (r.created_at < p.first) p.first = r.created_at;
       if (r.created_at > p.last) p.last = r.created_at;
@@ -737,6 +740,8 @@ app.get('/api/admin/stats/members', auth, async (req, res) => {
         full_days: fullDays,
         absent_days: absentDays,
         leave_days: totalLeaveDays,
+        today_slots: Array.from(p.todaySlots),
+        on_leave_today: leaveDates.has(todayK),
         first_checkin: p.first,
         last_checkin: p.last,
       };
@@ -783,6 +788,40 @@ app.get('/api/admin/checkins', auth, async (req, res) => {
        ORDER BY c.created_at DESC LIMIT 500`
     );
     res.json(rows.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 单个成员的全部打卡记录
+app.get('/api/admin/persons/checkins', auth, async (req, res) => {
+  try {
+    const { code, user } = req.query;
+    if (!code || !user) return res.status(400).json({ error: '缺少参数' });
+    const rows = await pool.query(
+      `SELECT c.*, g.code AS group_code, g.name AS group_name
+       FROM checkins c JOIN groups g ON c.group_id = g.id
+       WHERE g.code = $1 AND c.user_name = $2
+       ORDER BY c.created_at DESC`,
+      [code, user]
+    );
+    res.json(rows.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 清除单个成员在某群组的全部打卡记录
+app.delete('/api/admin/persons/checkins', auth, async (req, res) => {
+  try {
+    const { code, user } = req.query;
+    if (!code || !user) return res.status(400).json({ error: '缺少参数' });
+    await pool.query(
+      `DELETE FROM checkins c USING groups g
+       WHERE c.group_id = g.id AND g.code = $1 AND c.user_name = $2`,
+      [code, user]
+    );
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

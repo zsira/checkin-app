@@ -296,6 +296,21 @@
     </div>
   </div>
 
+  <!-- 人员详情弹窗 -->
+  <div id="person-modal" class="modal-mask hidden">
+    <div class="modal" style="max-width:520px">
+      <h3 id="person-modal-title">成员详情</h3>
+      <p class="muted" style="font-size:13px;margin-bottom:10px">群组：<b id="person-modal-group"></b></p>
+      <div id="person-modal-stats" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
+      <div id="person-modal-today" style="display:flex;gap:6px;margin-bottom:14px"></div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:8px">打卡记录</div>
+      <div id="person-records" style="max-height:45vh;overflow-y:auto"></div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="person-modal-close" style="flex:1">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <script src="admin.js?v=20261002"></script>
   <script>
     if ('serviceWorker' in navigator) {
