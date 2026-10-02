@@ -393,6 +393,8 @@ function distance(lat1, lng1, lat2, lng2) {
 // 反向地理编码
 const AMAP_KEY = process.env.AMAP_KEY || '';
 const TIANDITU_KEY = process.env.TIANDITU_KEY || '';
+// 记录最近一次高德调用的诊断信息（用于在搜不到时给出准确提示：未配key/key类型错误/超额）
+let geoDiag = { code: '', info: '' };
 
 function reverseGeocode(lat, lng) {
   return new Promise((resolve) => {
@@ -473,12 +475,14 @@ function httpGetJson(url, { timeout = 7000, headers = {} } = {}) {
 async function geocodeCandidates(keyword) {
   const kw = (keyword || '').trim();
   if (!kw) return { provider: 'none', results: [] };
+  geoDiag = { code: '', info: '' };
 
   // 1. 高德：POI 关键词搜索（公司名最准），无结果时降级到地址地理编码
   if (AMAP_KEY) {
     try {
       const poiUrl = `https://restapi.amap.com/v3/place/text?key=${AMAP_KEY}&keywords=${encodeURIComponent(kw)}&offset=8&page=1&extensions=base&output=json`;
       const j = await httpGetJson(poiUrl, { timeout: 6000 });
+      if (j.status !== '1') geoDiag = { code: String(j.infocode || ''), info: String(j.info || '') };
       const pois = (j.status === '1' && Array.isArray(j.pois)) ? j.pois : [];
       const results = pois
         .filter(p => p.location && p.location.includes(','))
@@ -496,6 +500,7 @@ async function geocodeCandidates(keyword) {
     try {
       const geoUrl = `https://restapi.amap.com/v3/geocode/geo?key=${AMAP_KEY}&address=${encodeURIComponent(kw)}&output=json`;
       const j = await httpGetJson(geoUrl, { timeout: 6000 });
+      if (j.status !== '1' && !geoDiag.code) geoDiag = { code: String(j.infocode || ''), info: String(j.info || '') };
       const list = (j.status === '1' && Array.isArray(j.geocodes)) ? j.geocodes : [];
       const results = list
         .filter(g => g.location && g.location.includes(','))
@@ -569,9 +574,19 @@ app.get('/api/admin/geocode', auth, async (req, res) => {
     if (address.length < 2) return res.status(400).json({ error: '请至少输入 2 个字' });
     const result = await geocodeCandidates(address);
     if (!result.results.length) {
-      return res.status(404).json({
-        error: '未找到该公司或地址，请尝试完整名称（如"东莞市XX公司"）或更详细的地址；也可直接点"使用当前位置"',
-      });
+      let hint;
+      if (!AMAP_KEY) {
+        hint = '免费地图库未收录该公司。精确搜索公司名需在服务器环境变量配置高德"Web服务"Key（AMAP_KEY）；临时可点"使用当前位置"在公司门口定位';
+      } else if (geoDiag.code === '10001') {
+        hint = '高德地图Key无效（AMAP_KEY），请检查Key是否填写正确、是否已在高德控制台启用';
+      } else if (geoDiag.code === '10002') {
+        hint = '高德Key类型不匹配（AMAP_KEY）：请在高德控制台申请"Web服务"类型的Key，不能用"Web端(JS API)"Key';
+      } else if (geoDiag.code === '10003' || geoDiag.code === '10044') {
+        hint = '高德地图今日查询额度已用完（个人Key每日5000次），可点"使用当前位置"临时定位';
+      } else {
+        hint = '未找到该公司或地址，请尝试完整名称（如"东莞市XX公司"）或更详细的地址；也可直接点"使用当前位置"';
+      }
+      return res.status(404).json({ error: hint });
     }
     res.json({ provider: result.provider, results: result.results });
   } catch (e) {
