@@ -169,7 +169,7 @@ async function syncAdminPush() {
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: adminUrlB64ToU8(key) });
     await fetch('/api/push/subscribe', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ subscription: sub, scope: 'admin' }),
     });
     updateAdminPushButton();
@@ -207,7 +207,7 @@ async function registerAdminSyncFallback() {
     const clientId = adminClientId();
     await fetch('/api/push/sync-register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: clientId, scope: 'admin' }),
     });
     const reg = await navigator.serviceWorker.ready;

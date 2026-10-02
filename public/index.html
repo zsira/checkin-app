@@ -29,6 +29,7 @@
         <label class="field-label">你的名字</label>
         <input id="input-name" class="input" type="text" placeholder="请输入昵称" maxlength="20">
         <button id="btn-continue" class="btn btn-primary">继续</button>
+        <p class="muted" style="text-align:center;font-size:12px;margin-top:10px">继续即表示你已阅读并同意<a id="link-privacy-setup" style="color:var(--primary);text-decoration:underline">《考勤定位告知与同意书》</a></p>
       </div>
     </section>
 
@@ -45,6 +46,7 @@
         <button id="btn-join-group" class="btn btn-primary">加入群组</button>
       </div>
       <p class="muted" style="text-align:center;font-size:13px;margin-top:16px">群组由管理员统一创建和管理</p>
+      <p class="muted" style="text-align:center;font-size:12px;margin-top:8px"><a id="link-privacy-group" style="color:var(--primary);text-decoration:underline">《考勤定位告知与同意书》</a></p>
 
     </section>
 
@@ -172,6 +174,27 @@
       </div>
     </div>
 
+    <!-- 考勤定位告知与同意（首次使用必读，同意前不可打卡） -->
+    <div id="privacy-modal" class="modal hidden">
+      <div class="modal-content" style="max-width:440px">
+        <h3>📋 考勤定位告知与同意书</h3>
+        <div style="font-size:13.5px;line-height:1.85;color:#444;max-height:50vh;overflow-y:auto;margin:8px 0 14px;padding-right:4px">
+          <p style="margin:0 0 8px">为使用打卡功能，公司将向你收集和使用以下个人信息，请仔细阅读：</p>
+          <p style="margin:0 0 6px"><b>1. 收集内容：</b>你的姓名、每次打卡时的位置（经纬度/地址）、打卡时间、定位精度，以及你提交的请假信息。</p>
+          <p style="margin:0 0 6px"><b>2. 使用目的：</b>仅用于公司考勤管理，包括上下班打卡、迟到/缺卡统计与工资核算，不用于其他用途。</p>
+          <p style="margin:0 0 6px"><b>3. 收集方式：</b>仅在你主动点击"打卡"时获取一次当前位置，<b>不会在后台持续定位或追踪你的行踪</b>。</p>
+          <p style="margin:0 0 6px"><b>4. 保存与查看：</b>数据保存在公司租用的云服务器上，仅公司管理员可查看；你离职后可要求管理员删除你的个人打卡数据。</p>
+          <p style="margin:0 0 6px"><b>5. 第三方服务：</b>为完成地图定位和消息推送，你的位置坐标可能提交给正规地图服务商，推送通知经手机系统通道加密传输。</p>
+          <p style="margin:0 0 6px"><b>6. 你的权利：</b>你可随时在本页面查看本人的打卡记录，对记录有疑问可联系管理员更正或补卡，也可要求删除个人信息。</p>
+          <p style="margin:8px 0 0;color:#b71c1c">如你不同意上述内容，将无法使用打卡定位功能。点击"同意"即表示你已知悉并同意公司按上述说明收集、使用你的位置等个人信息。</p>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button id="btn-privacy-agree" class="btn btn-primary" style="width:100%;margin:0">我已阅读并同意，开始使用</button>
+          <button id="btn-privacy-decline" class="btn btn-secondary" style="width:100%;margin:0">不同意</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 引导弹窗（安装 / 定位授权） -->
     <div id="guide-modal" class="modal hidden">
       <div class="modal-content">
@@ -190,6 +213,6 @@
     <div id="toast" class="toast hidden"></div>
   </div>
 
-  <script src="app.js?v=20261002e"></script>
+  <script src="app.js?v=20261002g"></script>
 </body>
 </html>

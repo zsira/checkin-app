@@ -31,7 +31,55 @@ let proxyAgent = null;
   }
 })();
 
+app.set('trust proxy', 1); // 部署在 Render 等反向代理后，取真实客户端 IP 用于限流
 app.use(express.json());
+
+// ---------- 简单内存限流（单实例足够，进程重启自动清零） ----------
+const rateBuckets = new Map();
+function makeLimiter({ windowMs, max, keyFn, message }) {
+  return (req, res, next) => {
+    const now = Date.now();
+    const k = keyFn(req);
+    let b = rateBuckets.get(k);
+    if (!b || now >= b.reset) { b = { count: 0, reset: now + windowMs }; rateBuckets.set(k, b); }
+    b.count++;
+    if (b.count > max) {
+      const retry = Math.ceil((b.reset - now) / 1000);
+      res.setHeader('Retry-After', String(retry));
+      return res.status(429).json({ error: message || `请求过于频繁，请 ${retry} 秒后再试` });
+    }
+    next();
+  };
+}
+const clientIp = (req) => req.ip || req.socket.remoteAddress || '?';
+// 全站 API：每 IP 每分钟 300 次（正常打卡+前台轮询远低于此，主要用于防刷/防爬）
+app.use('/api', makeLimiter({
+  windowMs: 60000, max: 300, keyFn: req => 'ip:' + clientIp(req),
+}));
+// 登录接口：每 IP 每 15 分钟最多 20 次
+const loginIpLimiter = makeLimiter({
+  windowMs: 15 * 60000, max: 20, keyFn: req => 'login:' + clientIp(req),
+  message: '尝试次数过多，请 15 分钟后再试',
+});
+// 定时清理过期限流桶
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, b] of rateBuckets) if (now >= b.reset) rateBuckets.delete(k);
+}, 5 * 60000).unref?.();
+
+// 登录失败锁定：同一用户名连续失败 5 次锁定 15 分钟
+const loginFails = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, f] of loginFails) if (now - (f.ts || 0) > 15 * 60000) loginFails.delete(k);
+}, 5 * 60000).unref?.();
+
+// 从请求中提取管理员令牌（Authorization: Bearer 或 x-admin-token）
+function adminTokenOf(req) {
+  const auth = req.headers.authorization || '';
+  if (auth.startsWith('Bearer ')) return auth.slice(7);
+  return req.headers['x-admin-token'] || '';
+}
 
 // manifest.json 用正确的 content-type，确保 PWA 可安装
 app.get('/manifest.json', (req, res) => {
@@ -597,12 +645,28 @@ app.get('/api/admin/geocode', auth, async (req, res) => {
 // ---------- 登录认证 ----------
 const validTokens = new Map();
 
-app.post('/api/admin/login', async (req, res) => {
+app.post('/api/admin/login', loginIpLimiter, async (req, res) => {
   try {
     const { username, password } = req.body || {};
-    const uname = username || 'admin';
+    const uname = (username || 'admin').trim();
+    const lockKey = uname.toLowerCase();
+    const now = Date.now();
+    // 账号锁定中
+    const locked = loginFails.get(lockKey);
+    if (locked && locked.until > now) {
+      const mins = Math.ceil((locked.until - now) / 60000);
+      return res.status(429).json({ error: `密码错误次数过多，账号已锁定，请 ${mins} 分钟后再试` });
+    }
     const admin = await verifyAdmin(uname, password);
-    if (!admin) return res.status(401).json({ error: '用户名或密码错误' });
+    if (!admin) {
+      const f = (locked && locked.until <= now) ? { count: 0, until: 0 } : (locked || { count: 0, until: 0 });
+      f.count += 1;
+      f.ts = now;
+      if (f.count >= 5) { f.until = now + 15 * 60000; f.count = 0; }
+      loginFails.set(lockKey, f);
+      return res.status(401).json({ error: '用户名或密码错误' });
+    }
+    loginFails.delete(lockKey);
     const token = crypto.randomBytes(32).toString('hex');
     validTokens.set(token, { id: admin.id, username: admin.username, is_super: admin.is_super });
     res.json({ token, username: admin.username, is_super: admin.is_super });
@@ -724,20 +788,17 @@ app.get('/api/groups/:code', async (req, res) => {
   }
 });
 
-// 设置打卡范围
-app.patch('/api/groups/:code', async (req, res) => {
+// 设置打卡范围（仅管理员，在管理后台操作）
+app.patch('/api/groups/:code', (req, res, next) => {
+  if (!validTokens.has(adminTokenOf(req))) {
+    return res.status(403).json({ error: '仅管理员可修改打卡范围，请在管理后台操作' });
+  }
+  next();
+}, async (req, res) => {
   try {
-    const { center_lat, center_lng, radius, userName } = req.body || {};
+    const { center_lat, center_lng, radius } = req.body || {};
     const group = await pool.query('SELECT * FROM groups WHERE code = $1', [req.params.code]);
     if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
-    const g = group.rows[0];
-
-    if (g.creator && g.creator !== (userName || '').trim()) {
-      const token = req.headers['x-admin-token'];
-      if (!token || !validTokens.has(token)) {
-        return res.status(403).json({ error: '只有群主（创建者）才能修改打卡范围' });
-      }
-    }
 
     if (radius != null && (isNaN(radius) || radius < 0 || radius > 100000)) {
       return res.status(400).json({ error: '半径需在 0-100000 米之间' });
@@ -844,20 +905,15 @@ app.post('/api/checkins', async (req, res) => {
 
 app.get('/api/groups/:code/checkins', async (req, res) => {
   try {
+    // 员工端只能按姓名查询本人记录；不带姓名拒绝（不再返回全组数据）
+    const userName = (req.query.user_name || '').trim();
+    if (!userName) return res.status(400).json({ error: '缺少参数' });
     const group = await pool.query('SELECT id FROM groups WHERE code = $1', [req.params.code]);
     if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
-    const gid = group.rows[0].id;
-    const userName = (req.query.user_name || '').trim();
-    let rows;
-    if (userName) {
-      // 仅返回该用户自己的打卡记录
-      rows = await pool.query(
-        'SELECT * FROM checkins WHERE group_id = $1 AND user_name = $2 ORDER BY created_at DESC',
-        [gid, userName]
-      );
-    } else {
-      rows = await pool.query('SELECT * FROM checkins WHERE group_id = $1 ORDER BY created_at DESC', [gid]);
-    }
+    const rows = await pool.query(
+      'SELECT * FROM checkins WHERE group_id = $1 AND user_name = $2 ORDER BY created_at DESC',
+      [group.rows[0].id, userName]
+    );
     res.json(rows.rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -913,13 +969,18 @@ app.get('/api/leaves', async (req, res) => {
   }
 });
 
-// 删除自己的请假（取消请假）
+// 删除自己的请假（取消请假）：必须同时提供本人姓名与所在群组邀请码，且记录确实属于该群该人
 app.delete('/api/leaves/:id', async (req, res) => {
   try {
-    const { userName } = req.query;
+    const { userName, groupCode } = req.query;
     const id = parseInt(req.params.id);
-    if (!userName) return res.status(400).json({ error: '缺少参数' });
-    await pool.query('DELETE FROM leaves WHERE id = $1 AND user_name = $2', [id, userName.trim()]);
+    if (!userName || !groupCode) return res.status(400).json({ error: '缺少参数' });
+    const group = await pool.query('SELECT id FROM groups WHERE code = $1', [String(groupCode).trim()]);
+    if (group.rows.length === 0) return res.status(404).json({ error: '群组不存在' });
+    await pool.query(
+      'DELETE FROM leaves WHERE id = $1 AND user_name = $2 AND group_id = $3',
+      [id, String(userName).trim(), group.rows[0].id]
+    );
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -945,6 +1006,10 @@ app.post('/api/push/subscribe', async (req, res) => {
     const { endpoint, keys } = subscription;
     if (!keys.p256dh || !keys.auth) return res.status(400).json({ error: '订阅数据无效' });
     const s = (scope === 'admin') ? 'admin' : 'user';
+    // 管理端订阅会接收全员请假等通知，必须持有效管理员令牌
+    if (s === 'admin' && !validTokens.has(adminTokenOf(req))) {
+      return res.status(401).json({ error: '无权限' });
+    }
     // 同一设备（endpoint）更新其绑定对象
     await pool.query(
       `INSERT INTO push_subscriptions (endpoint, p256dh, auth, scope, group_code, user_name, created_at)
@@ -976,6 +1041,10 @@ app.post('/api/push/sync-register', async (req, res) => {
     const { client_id, scope, group_code, user_name } = req.body || {};
     if (!client_id) return res.status(400).json({ error: '缺少 client_id' });
     const s = (scope === 'admin') ? 'admin' : 'user';
+    // 管理端同步通道可拉取后台通知，必须持有效管理员令牌
+    if (s === 'admin' && !validTokens.has(adminTokenOf(req))) {
+      return res.status(401).json({ error: '无权限' });
+    }
     await pool.query(
       `INSERT INTO sync_clients (client_id, scope, group_code, user_name, updated_at)
        VALUES ($1, $2, $3, $4, $5)
@@ -1028,6 +1097,7 @@ app.post('/api/push/test', async (req, res) => {
     const { scope, group_code, user_name } = req.body || {};
     const payload = { title: '🔔 推送测试成功', body: `这是一条测试通知，发送时间 ${cnFmtDateTime(Date.now())}`, tag: 'test-' + Date.now() };
     if (scope === 'admin') {
+      if (!validTokens.has(adminTokenOf(req))) return res.status(401).json({ error: '无权限' });
       await pushToAdmins(payload);
     } else if (group_code && user_name) {
       await pushToUser(group_code, user_name.trim(), payload);

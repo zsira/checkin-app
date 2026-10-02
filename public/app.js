@@ -11,6 +11,17 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+// ---------- 考勤定位告知同意（个人信息保护合规：同意前不收集位置） ----------
+const PRIVACY_VERSION = 'v1';
+function hasPrivacyConsent() { return localStorage.getItem('ci_privacy_consent') === PRIVACY_VERSION; }
+function showPrivacyModal() { $('privacy-modal').classList.remove('hidden'); }
+function requirePrivacyConsent() {
+  if (hasPrivacyConsent()) return true;
+  showPrivacyModal();
+  toast('请先阅读并同意《考勤定位告知与同意书》');
+  return false;
+}
+
 // ---------- 四个固定打卡时段 ----------
 // 0=早上上班卡 07:30，1=中午下班卡 12:00，2=下午上班卡 13:30，3=下午下班卡 18:00
 const PUNCH_SLOTS = [
@@ -202,7 +213,11 @@ function init() {
     localStorage.setItem('ci_group', state.groupCode);
   }
 
-  if (!state.userName) {
+  // 未同意《考勤定位告知书》：只显示入口，不加载群组/打卡等任何业务数据
+  if (!hasPrivacyConsent()) {
+    showPrivacyModal();
+    showView(state.userName ? 'group' : 'setup');
+  } else if (!state.userName) {
     showView('setup');
   } else if (state.groupCode) {
     enterGroup(state.groupCode, state.groupName);
@@ -213,8 +228,32 @@ function init() {
   bindEvents();
 }
 
+// 同意告知书后的正常进入流程
+function proceedAfterConsent() {
+  if (state.userName && state.groupCode) {
+    enterGroup(state.groupCode, state.groupName);
+  } else if (state.userName) {
+    showGroupView();
+  } else {
+    showView('setup');
+  }
+}
+
 function bindEvents() {
+  // 隐私告知
+  $('btn-privacy-agree').onclick = () => {
+    localStorage.setItem('ci_privacy_consent', PRIVACY_VERSION);
+    $('privacy-modal').classList.add('hidden');
+    proceedAfterConsent();
+  };
+  $('btn-privacy-decline').onclick = () => {
+    alert('你尚未同意《考勤定位告知与同意书》，暂时无法使用打卡功能。\n\n如改变主意，可重新打开本页面阅读并点击"同意"。');
+  };
+  $('link-privacy-setup').onclick = showPrivacyModal;
+  $('link-privacy-group').onclick = showPrivacyModal;
+
   $('btn-continue').onclick = () => {
+    if (!requirePrivacyConsent()) return;
     const name = $('input-name').value.trim();
     if (!name) return toast('请输入名字');
     state.userName = name;
@@ -283,6 +322,7 @@ function showGroupView() {
 }
 
 async function joinGroup() {
+  if (!requirePrivacyConsent()) return;
   const code = $('input-group-code').value.trim().toUpperCase();
   if (!code) return toast('请输入邀请码');
   try {
@@ -396,6 +436,7 @@ function leaveGroup() {
 
 // ---------- 打卡 ----------
 async function doCheckin() {
+  if (!requirePrivacyConsent()) return;
   const btn = $('btn-checkin');
   const status = $('location-status');
   btn.disabled = true;
@@ -1058,6 +1099,7 @@ function openLeaveModal() {
 }
 
 async function submitLeave() {
+  if (!requirePrivacyConsent()) return;
   let startTs, endTs;
   const mode = $('leave-mode').value;
   const reason = $('leave-reason').value.trim();
