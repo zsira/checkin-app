@@ -6,6 +6,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const dns = require('dns');
+const webpush = require('web-push');
 
 // 强制 IPv4 优先（部分云平台如 Railway 不支持 IPv6 出站）
 dns.setDefaultResultOrder('ipv4first');
@@ -106,6 +107,17 @@ async function initDb() {
       created_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_leaves_group_user ON leaves(group_id, user_name);
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id SERIAL PRIMARY KEY,
+      endpoint TEXT UNIQUE NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'user',
+      group_code TEXT,
+      user_name TEXT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_push_target ON push_subscriptions(scope, group_code, user_name);
   `);
 
   // 兼容性：添加休息字段（如已存在则跳过）
@@ -135,7 +147,90 @@ async function initDb() {
   console.log('[数据库] PostgreSQL 连接成功，表结构已就绪');
 }
 
-initDb().catch(err => {
+let pushReady = false;
+async function initPush() {
+  try {
+    let publicKey = process.env.VAPID_PUBLIC_KEY;
+    let privateKey = process.env.VAPID_PRIVATE_KEY;
+    if (!publicKey || !privateKey) {
+      // 从数据库读取已生成的密钥
+      const saved = await pool.query("SELECT key, value FROM admin_settings WHERE key IN ('vapid_public','vapid_private')");
+      const map = {};
+      saved.rows.forEach(r => { map[r.key] = r.value; });
+      if (map.vapid_public && map.vapid_private) {
+        publicKey = map.vapid_public;
+        privateKey = map.vapid_private;
+      } else {
+        // 首次运行：生成并持久化（保证重启后订阅不失效）
+        const keys = webpush.generateVAPIDKeys();
+        publicKey = keys.publicKey;
+        privateKey = keys.privateKey;
+        await pool.query(
+          "INSERT INTO admin_settings (key, value) VALUES ('vapid_public', $1), ('vapid_private', $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+          [publicKey, privateKey]
+        );
+        console.log('[推送] 已自动生成 VAPID 密钥');
+      }
+    }
+    webpush.setVapidDetails('mailto:admin@checkin.app', publicKey, privateKey);
+    pushReady = true;
+    console.log('[推送] Web Push 后台推送已就绪');
+    return publicKey;
+  } catch (e) {
+    console.error('[推送] 初始化失败:', e.message);
+  }
+}
+
+// 给单个订阅发送推送，自动清理失效订阅
+async function sendOnePush(sub, payload) {
+  try {
+    await webpush.sendNotification(
+      { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+      JSON.stringify(payload)
+    );
+  } catch (e) {
+    if (e.statusCode === 404 || e.statusCode === 410) {
+      await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [sub.endpoint]).catch(() => {});
+    } else {
+      console.error('[推送] 发送失败:', e.statusCode || e.message);
+    }
+  }
+}
+
+// 推送给指定群组中的某个成员
+async function pushToUser(groupCode, userName, payload) {
+  if (!pushReady) return;
+  try {
+    const r = await pool.query(
+      "SELECT * FROM push_subscriptions WHERE scope = 'user' AND group_code = $1 AND user_name = $2",
+      [groupCode, userName]
+    );
+    await Promise.all(r.rows.map(s => sendOnePush(s, payload)));
+  } catch (e) { console.error('[推送] pushToUser:', e.message); }
+}
+
+// 群发给整个群组成员
+async function pushToGroup(groupCode, payload) {
+  if (!pushReady) return;
+  try {
+    const r = await pool.query(
+      "SELECT DISTINCT ON (endpoint) * FROM push_subscriptions WHERE scope = 'user' AND group_code = $1",
+      [groupCode]
+    );
+    await Promise.all(r.rows.map(s => sendOnePush(s, payload)));
+  } catch (e) { console.error('[推送] pushToGroup:', e.message); }
+}
+
+// 推送给所有管理员
+async function pushToAdmins(payload) {
+  if (!pushReady) return;
+  try {
+    const r = await pool.query("SELECT DISTINCT ON (endpoint) * FROM push_subscriptions WHERE scope = 'admin'");
+    await Promise.all(r.rows.map(s => sendOnePush(s, payload)));
+  } catch (e) { console.error('[推送] pushToAdmins:', e.message); }
+}
+
+initDb().then(initPush).catch(err => {
   console.error('[数据库] 初始化失败:', err.message);
 });
 
@@ -650,6 +745,18 @@ app.post('/api/leaves', async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [group.rows[0].id, userName.trim(), start, end, (reason || '').trim() || null, now()]
     );
+    // 后台推送给所有管理员
+    const grp = await pool.query('SELECT name FROM groups WHERE id = $1', [group.rows[0].id]);
+    const fmt = ts => {
+      const d = new Date(Number(ts));
+      return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    };
+    const days = ((end - start) / 86400000).toFixed(1).replace(/\.0$/, '');
+    pushToAdmins({
+      title: '📝 新请假申请',
+      body: `${userName.trim()}（${grp.rows[0]?.name || groupCode}）请假 ${days} 天\n${fmt(start)} ~ ${fmt(end)}${reason ? '\n原因：' + reason.trim() : ''}`,
+      tag: 'leave-' + info.rows[0].id,
+    });
     res.json(info.rows[0]);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -680,6 +787,50 @@ app.delete('/api/leaves/:id', async (req, res) => {
     const id = parseInt(req.params.id);
     if (!userName) return res.status(400).json({ error: '缺少参数' });
     await pool.query('DELETE FROM leaves WHERE id = $1 AND user_name = $2', [id, userName.trim()]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Web Push 订阅（公开接口，订阅本身不含敏感数据） ----------
+app.get('/api/push/vapid-key', async (req, res) => {
+  try {
+    const saved = await pool.query("SELECT value FROM admin_settings WHERE key = 'vapid_public'");
+    res.json({ key: saved.rows[0]?.value || process.env.VAPID_PUBLIC_KEY || '' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/push/subscribe', async (req, res) => {
+  try {
+    const { subscription, scope, group_code, user_name } = req.body || {};
+    if (!subscription || !subscription.endpoint || !subscription.keys) {
+      return res.status(400).json({ error: '订阅数据无效' });
+    }
+    const { endpoint, keys } = subscription;
+    if (!keys.p256dh || !keys.auth) return res.status(400).json({ error: '订阅数据无效' });
+    const s = (scope === 'admin') ? 'admin' : 'user';
+    // 同一设备（endpoint）更新其绑定对象
+    await pool.query(
+      `INSERT INTO push_subscriptions (endpoint, p256dh, auth, scope, group_code, user_name, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (endpoint) DO UPDATE
+       SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, scope = EXCLUDED.scope,
+           group_code = EXCLUDED.group_code, user_name = EXCLUDED.user_name`,
+      [endpoint, keys.p256dh, keys.auth, s, group_code || null, (user_name || '').trim() || null, Date.now()]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/push/unsubscribe', async (req, res) => {
+  try {
+    const { endpoint } = req.body || {};
+    if (endpoint) await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint]);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -880,6 +1031,14 @@ app.post('/api/admin/persons/makeup-checkin', auth, async (req, res) => {
       [g.id, user.trim(), '管理员补卡', punchType, (reason || '').trim() || null, punchTs]
     );
     const row = await pool.query('SELECT * FROM checkins WHERE id = $1', [info.rows[0].id]);
+    // 后台推送给被补卡成员（页面关闭也能收到）
+    const md = new Date(punchTs);
+    const timeStr = `${md.getFullYear()}/${md.getMonth()+1}/${md.getDate()} ${String(md.getHours()).padStart(2,'0')}:${String(md.getMinutes()).padStart(2,'0')}`;
+    pushToUser(code, user.trim(), {
+      title: '🔧 管理员补卡通知',
+      body: `已为你补卡：${PUNCH_SLOTS[punchType].name}（${timeStr}），状态正常${reason ? '\n原因：' + reason.trim() : ''}`,
+      tag: 'makeup-' + info.rows[0].id,
+    });
     res.json({ ...row.rows[0], punch_name: PUNCH_SLOTS[punchType].name, punch_time: PUNCH_SLOTS[punchType].time });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -934,6 +1093,26 @@ app.post('/api/admin/groups/:id/rest', auth, async (req, res) => {
       'UPDATE groups SET rest_until = $1, rest_reason = $2 WHERE id = $3',
       [until, rest_reason || null, id]
     );
+    // 后台群发给群成员
+    const gr = await pool.query('SELECT code, name FROM groups WHERE id = $1', [id]);
+    if (gr.rows.length) {
+      const g = gr.rows[0];
+      if (until && until > Date.now()) {
+        const d = new Date(until);
+        const timeStr = `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        pushToGroup(g.code, {
+          title: '🛌 群组休息通知',
+          body: `${g.name}休息中，暂停打卡至 ${timeStr}${rest_reason ? '\n原因：' + rest_reason : ''}`,
+          tag: 'rest-' + g.code,
+        });
+      } else {
+        pushToGroup(g.code, {
+          title: '▶️ 休息已结束',
+          body: `${g.name}已恢复打卡`,
+          tag: 'rest-' + g.code,
+        });
+      }
+    }
     res.json({ ok: true, rest_until: until, rest_reason: rest_reason || null });
   } catch (e) {
     res.status(500).json({ error: e.message });

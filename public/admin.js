@@ -67,6 +67,7 @@ function init() {
   $('btn-login').onclick = doLogin;
   $('login-password').onkeydown = (e) => e.key === 'Enter' && doLogin();
   $('btn-logout').onclick = logout;
+  $('btn-admin-push').onclick = enableAdminPush;
   $('btn-export').onclick = doExport;
   $('modal-cancel').onclick = closeModal;
   $('modal-save').onclick = saveEdit;
@@ -127,6 +128,82 @@ function showAdmin() {
   $('login-screen').classList.add('hidden');
   $('admin-content').classList.remove('hidden');
   if (!refreshTimer) refreshTimer = setInterval(loadAll, 30000);
+  updateAdminPushButton();
+  syncAdminPush(); // 已授权则自动静默订阅
+}
+
+// ---------- Web Push（接收成员请假等后台推送） ----------
+function adminPushSupported() {
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+function adminUrlB64ToU8(s) {
+  const padding = '='.repeat((4 - s.length % 4) % 4);
+  const raw = atob((s + padding).replace(/-/g, '+').replace(/_/g, '/'));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; ++i) out[i] = raw.charCodeAt(i);
+  return out;
+}
+async function syncAdminPush() {
+  if (!adminPushSupported() || Notification.permission !== 'granted') return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const keyRes = await fetch('/api/push/vapid-key');
+    const { key } = await keyRes.json();
+    if (!key) return;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: adminUrlB64ToU8(key) });
+    await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: sub, scope: 'admin' }),
+    });
+    updateAdminPushButton();
+  } catch (e) { console.warn('管理员推送订阅失败:', e); }
+}
+async function enableAdminPush() {
+  if (!adminPushSupported()) {
+    alert('当前浏览器不支持后台推送。\n\niPhone 需用 Safari「添加到主屏幕」后从主屏幕图标进入（iOS 16.4+）。');
+    return;
+  }
+  let perm = Notification.permission;
+  if (perm === 'default') perm = await Notification.requestPermission();
+  if (perm !== 'granted') { alert('通知权限未开启，请在浏览器设置中允许本站通知。'); updateAdminPushButton(); return; }
+  await syncAdminPush();
+  alert('🔔 已开启，成员请假时将推送到本设备（页面关闭也能收到）');
+}
+function updateAdminPushButton() {
+  const btn = $('btn-admin-push');
+  if (!btn) return;
+  if (!adminPushSupported()) { btn.textContent = '🔕 设备不支持推送'; btn.disabled = true; btn.style.opacity = '0.5'; return; }
+  btn.disabled = false; btn.style.opacity = '';
+  btn.textContent = Notification.permission === 'granted' ? '🔔 请假推送已开启'
+    : Notification.permission === 'denied' ? '🔕 通知被禁用' : '🔔 开启请假推送';
+}
+
+// 页面打开时，SW 转发的服务端推送 → 轻提示并刷新数据
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'server-push') {
+      const p = e.data.payload || {};
+      adminToast(p.title || '新通知', p.body || '');
+      const content = $('admin-content');
+      if (content && !content.classList.contains('hidden')) loadAll();
+    }
+  });
+}
+
+function adminToast(title, body) {
+  let box = document.getElementById('admin-toast');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'admin-toast';
+    box.style.cssText = 'position:fixed;left:50%;top:20px;transform:translateX(-50%);background:#323232;color:#fff;padding:12px 18px;border-radius:10px;font-size:14px;z-index:99999;max-width:90vw;box-shadow:0 4px 16px rgba(0,0,0,.25);white-space:pre-line;line-height:1.5';
+    document.body.appendChild(box);
+  }
+  box.textContent = title + (body ? '\n' + body : '');
+  box.style.display = 'block';
+  clearTimeout(box._t);
+  box._t = setTimeout(() => { box.style.display = 'none'; }, 5000);
 }
 
 async function doLogin() {

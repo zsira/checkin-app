@@ -152,9 +152,24 @@ function init() {
     navigator.serviceWorker.register('service-worker.js').catch(() => {});
   }
 
-  // 请求通知权限（用于接收群休息等推送通知）
-  if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission().catch(() => {});
+  // 推送开关按钮（进入群组后生效）
+  const pushBtn = $('btn-push-toggle');
+  if (pushBtn) pushBtn.onclick = enablePush;
+
+  // 页面打开时，Service Worker 把服务端推送转发为页面内轻提示
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'server-push') {
+        const p = e.data.payload || {};
+        toast(p.title || '新通知');
+        if ((p.tag || '').startsWith('makeup-')) {
+          const id = Number(String(p.tag).replace('makeup-', ''));
+          if (id) notifiedMakeupIds.add(id);
+          loadRecords();
+        }
+        if ((p.tag || '').startsWith('rest-')) loadGroupSettings();
+      }
+    });
   }
 
   // 防截屏：禁用右键、复制、拖拽（输入框/文本域内不禁用）
@@ -291,6 +306,8 @@ function enterGroup(code, name) {
   $('group-code-label').textContent = code;
   showView('main');
   updateCurrentPunch();
+  updatePushButton();
+  syncPushSubscription();
   loadRecords();
   loadLeaves();
   loadGroupSettings();
@@ -342,13 +359,7 @@ function handleRestStatus(restUntil, restReason) {
     btn.style.cursor = 'not-allowed';
     btn.querySelector('.checkin-text').textContent = '休息中';
     btn.querySelector('.checkin-sub').textContent = '暂停打卡';
-    // 推送通知（如果已授权）
-    if (Notification.permission === 'granted') {
-      new Notification('🛌 群组休息通知', {
-        body: `${state.groupName || '当前群组'}休息中，截止 ${timeStr}${restReason ? '\n原因：' + restReason : ''}`,
-        tag: 'rest-notice-' + state.groupCode,
-      });
-    }
+    // 注：后台/锁屏通知由服务端 Web Push 统一发送，页面打开时此处已有休息提示条，不重复弹通知
   } else {
     // 未休息
     notice.classList.add('hidden');
@@ -556,6 +567,7 @@ async function loadRecords() {
 
 // ---------- 管理员补卡推送 ----------
 let knownMakeupIds = null;
+let notifiedMakeupIds = new Set();
 let makeupPollTimer = null;
 
 function startMakeupPolling() {
@@ -580,15 +592,89 @@ function detectNewMakeup(rows) {
   const fresh = makeupRows.filter(r => !knownMakeupIds.has(r.id));
   fresh.forEach(r => {
     knownMakeupIds.add(r.id);
-    const d = new Date(Number(r.created_at));
-    const timeStr = `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-    const slot = PUNCH_SLOTS[punchSlotOf(r)];
-    const body = `管理员已为你补卡：${slot.name}（${timeStr}），状态正常${r.makeup_reason ? '\n原因：' + r.makeup_reason : ''}`;
-    toast('🔧 收到一条管理员补卡记录');
-    if (Notification.permission === 'granted') {
-      new Notification('🔧 补卡通知', { body, tag: 'makeup-' + r.id });
+    // 服务端推送（SW）已提示过的不重复弹；未走推送通道时用轮询兜底提示
+    if (!notifiedMakeupIds.has(r.id)) {
+      notifiedMakeupIds.add(r.id);
+      toast('🔧 收到一条管理员补卡记录');
     }
   });
+}
+
+// ---------- Web Push 后台推送 ----------
+function pushSupported() {
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; ++i) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+// 已授权时自动（重新）注册并绑定当前群组+人员
+async function syncPushSubscription() {
+  if (!pushSupported() || Notification.permission !== 'granted') return;
+  if (!state.groupCode || !state.userName) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const keyRes = await fetch('/api/push/vapid-key');
+    const { key } = await keyRes.json();
+    if (!key) return;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(key),
+      });
+    }
+    await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: sub, scope: 'user', group_code: state.groupCode, user_name: state.userName }),
+    });
+    updatePushButton();
+  } catch (e) {
+    console.warn('推送订阅失败:', e);
+  }
+}
+
+async function enablePush() {
+  if (!pushSupported()) {
+    alert('当前浏览器不支持后台推送。\n\niPhone 用户：请用 Safari 打开本页面 → 底部分享按钮 →「添加到主屏幕」→ 从主屏幕图标进入后再开启（需 iOS 16.4 或更高版本）。\n\n安卓 Chrome 直接允许通知即可。');
+    return;
+  }
+  try {
+    let perm = Notification.permission;
+    if (perm === 'default') perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      alert('通知权限未开启。\n\n请在浏览器设置中允许本站通知，再回来点击此按钮。');
+      updatePushButton();
+      return;
+    }
+    await syncPushSubscription();
+    toast('🔔 已开启后台推送，锁屏或关闭页面也能收到通知');
+  } catch (e) {
+    toast('开启失败：' + (e.message || '未知错误'));
+  }
+}
+
+function updatePushButton() {
+  const btn = $('btn-push-toggle');
+  if (!btn) return;
+  if (!pushSupported()) {
+    btn.textContent = '🔕 设备不支持后台推送';
+    btn.disabled = true;
+    btn.style.opacity = '0.55';
+    return;
+  }
+  btn.disabled = false;
+  btn.style.opacity = '';
+  if (Notification.permission === 'granted') btn.textContent = '🔔 推送提醒已开启';
+  else if (Notification.permission === 'denied') btn.textContent = '🔕 通知被禁用（点此查看帮助）';
+  else btn.textContent = '🔔 开启打卡推送提醒';
 }
 
 // 顶部显示当前应打卡种
